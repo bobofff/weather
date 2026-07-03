@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=80.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "weather-polymarket"
+version = "0.1.0"
+description = "Standalone Polymarket weather portfolio and hedge-lock research toolkit."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0.2",
+]
+
+[project.scripts]
+weather = "weather_quant.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

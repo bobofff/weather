@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Polymarket 天气组合锁利</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Polymarket 天气组合锁利</h1>
+          <p>多桶 YES 持仓、可清算价值、分批退出和核心区间 hedge lock。</p>
+        </div>
+        <button id="runButton" type="button">评估组合</button>
+      </header>
+
+      <section class="panel">
+        <h2>Polymarket 盘口</h2>
+        <div class="market-grid">
+          <label>Slug
+            <input id="marketSlug" type="text" autocomplete="off" placeholder="精确 market slug">
+          </label>
+          <label>Condition ID
+            <input id="conditionId" type="text" autocomplete="off" placeholder="0x...">
+          </label>
+          <label>城市
+            <select id="citySelect">
+              <option value="Munich" data-unit="C">慕尼黑</option>
+              <option value="Moscow" data-unit="C">莫斯科</option>
+              <option value="Ankara" data-unit="C">安卡拉</option>
+              <option value="Las Vegas" data-unit="F">拉斯维加斯</option>
+            </select>
+          </label>
+          <label class="wide">关键词覆盖（可选）
+            <input id="marketQuery" type="text" autocomplete="off" placeholder="留空则使用所选城市">
+          </label>
+          <label>日期
+            <input id="targetDate" type="date">
+          </label>
+          <label>类型
+            <select id="temperatureKind">
+              <option value="high">最高温</option>
+              <option value="low">最低温</option>
+            </select>
+          </label>
+          <label>模型
+            <select id="weatherModels" multiple size="3">
+              <option value="ecmwf_ifs025" selected>ECMWF IFS 0.25</option>
+              <option value="gfs_seamless">GFS Seamless</option>
+              <option value="ukmo_seamless">UKMO Seamless</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input id="includeOrderbooks" type="checkbox" checked>
+            CLOB 盘口
+          </label>
+          <button id="fetchForecastButton" type="button">获取预报</button>
+          <button id="fetchMarketButton" type="button">获取盘口</button>
+        </div>
+      </section>
+
+      <section id="notice" class="notice" hidden></section>
+
+      <section class="panel">
+        <h2>天气模型</h2>
+        <div id="forecast"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Ensemble Probability</h2>
+        <div class="market-grid">
+          <label>Ensemble
+            <select id="ensembleModel">
+              <option value="gfs_seamless">GFS Ensemble Seamless</option>
+              <option value="ecmwf_ifs025" selected>ECMWF IFS Ensemble 0.25</option>
+              <option value="ecmwf_aifs025">ECMWF AIFS Ensemble 0.25</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input id="saveSqlite" type="checkbox">
+            保存 SQLite
+          </label>
+          <button id="fetchEnsembleButton" type="button">获取 Ensemble</button>
+          <button id="fetchEnsembleSignalButton" type="button">Ensemble Signal</button>
+        </div>
+        <div id="ensembleProbability"></div>
+      </section>
+
+      <section class="panel">
+        <h2>历史记录</h2>
+        <div class="history-grid">
+          <div id="recentRuns"></div>
+          <div id="recentProbabilities"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>天气盘口</h2>
+        <div id="markets"></div>
+      </section>
+
+      <section class="panel input-grid">
+        <label>
+          当前持仓 CSV
+          <textarea id="positionsCsv" rows="8"></textarea>
+        </label>
+        <label>
+          市场快照 CSV（可选）
+          <textarea id="marketsCsv" rows="8"></textarea>
+        </label>
+      </section>
+
+      <section class="panel compact-grid">
+        <label>单位
+          <select id="unit">
+            <option value="F">F</option>
+            <option value="C">C</option>
+          </select>
+        </label>
+        <label>Taker 费率 <input id="feeRate" type="number" min="0" max="1" step="0.001" value="0.05"></label>
+        <label>最小 cashout <input id="minCashoutRatio" type="number" min="0" max="1" step="0.001" value="0.50"></label>
+        <label>目标锁利 <input id="targetProfit" type="number" step="0.01" value="0"></label>
+        <label>核心概率阈值 <input id="tailProbabilityCutoff" type="number" min="0" max="1" step="0.001" value="0.05"></label>
+        <label>最大尾部概率 <input id="maxTailProbability" type="number" min="0" max="1" step="0.001" value="0.10"></label>
+      </section>
+
+      <section id="summary" class="metrics"></section>
+
+      <section class="panel">
+        <h2>持仓估值</h2>
+        <div id="valuations"></div>
+      </section>
+
+      <section class="panel">
+        <h2>分批被动退出</h2>
+        <div id="exits"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Hedge legs</h2>
+        <div id="hedgeLegs"></div>
+      </section>
+
+      <section class="panel">
+        <h2>组合情景矩阵</h2>
+        <div id="scenarios"></div>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

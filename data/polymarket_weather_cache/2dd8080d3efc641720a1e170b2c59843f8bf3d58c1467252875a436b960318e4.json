@@ -1,0 +1,4 @@
+{
+  "$schema": "https://gamma-api.polymarket.com/schemas/EventsKeysetListResponse.json",
+  "events": []
+}
