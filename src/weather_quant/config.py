@@ -77,7 +77,13 @@ DEFAULT_CITY_CONFIGS: dict[str, CityConfig] = {
         settlement_station="London official settlement station",
         forecast_granularity="city",
         settlement_unit="C",
-        weather_models=("ecmwf_ifs025", "gfs_seamless", "ukmo_seamless"),
+        weather_models=(
+            "ecmwf_ifs025",
+            "icon_seamless",
+            "meteofrance_seamless",
+            "gfs_seamless",
+            "ukmo_seamless",
+        ),
         model_error_std=1.4,
         min_distribution_std=0.8,
     ),
@@ -90,7 +96,13 @@ DEFAULT_CITY_CONFIGS: dict[str, CityConfig] = {
         settlement_station="Munich official settlement station",
         forecast_granularity="city",
         settlement_unit="C",
-        weather_models=("ecmwf_ifs025", "gfs_seamless", "ukmo_seamless"),
+        weather_models=(
+            "ecmwf_ifs025",
+            "icon_seamless",
+            "meteofrance_seamless",
+            "gfs_seamless",
+            "ukmo_seamless",
+        ),
         model_error_std=1.4,
         min_distribution_std=0.8,
     ),
@@ -103,7 +115,13 @@ DEFAULT_CITY_CONFIGS: dict[str, CityConfig] = {
         settlement_station="Moscow official settlement station",
         forecast_granularity="city",
         settlement_unit="C",
-        weather_models=("ecmwf_ifs025", "gfs_seamless", "ukmo_seamless"),
+        weather_models=(
+            "ecmwf_ifs025",
+            "icon_seamless",
+            "meteofrance_seamless",
+            "gfs_seamless",
+            "ukmo_seamless",
+        ),
         model_error_std=1.6,
         min_distribution_std=0.9,
     ),
@@ -116,7 +134,13 @@ DEFAULT_CITY_CONFIGS: dict[str, CityConfig] = {
         settlement_station="Ankara official settlement station",
         forecast_granularity="city",
         settlement_unit="C",
-        weather_models=("ecmwf_ifs025", "gfs_seamless", "ukmo_seamless"),
+        weather_models=(
+            "ecmwf_ifs025",
+            "icon_seamless",
+            "meteofrance_seamless",
+            "gfs_seamless",
+            "ukmo_seamless",
+        ),
         model_error_std=1.5,
         min_distribution_std=0.8,
     ),
@@ -190,7 +214,13 @@ def city_from_mapping(city_id: str, payload: Mapping[str, Any]) -> CityConfig:
     else:
         model_tuple = tuple(str(item).strip() for item in models if str(item).strip())
     if not model_tuple:
-        model_tuple = ("ecmwf_ifs025", "gfs_seamless", "ukmo_seamless")
+        model_tuple = (
+            "ecmwf_ifs025",
+            "icon_seamless",
+            "meteofrance_seamless",
+            "gfs_seamless",
+            "ukmo_seamless",
+        )
 
     weights_payload = payload.get("model_weights") or {}
     weights = {

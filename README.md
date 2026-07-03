@@ -75,12 +75,14 @@ P(bucket) = 命中该温度桶的 ensemble member 数 / ensemble member 总数
 
 Open-Meteo ensemble 客户端走 `https://ensemble-api.open-meteo.com/v1/ensemble`，普通 forecast 仍走 `https://api.open-meteo.com/v1/forecast`。当前先支持 hourly `temperature_2m` 和 `gfs_seamless`、`ecmwf_ifs025`、`ecmwf_aifs025` 等 ensemble model 参数。测试全部使用 mock payload，不访问真实网络。
 
+注意：Open-Meteo 返回的是指定模型在指定网格点的预报，不等于 Polymarket 最终结算源。实盘不要把单一模型当成真值；同一城市同一天可能出现 IFS 明显偏冷、AIFS/ICON/Meteo-France 更贴近盘口和常见天气聚合源的情况。前端默认展示多模型确定性预报，ensemble 默认使用 `ecmwf_aifs025`，`Ensemble Signal` 会尝试按城市/日期自动发现 Polymarket 桶并画出盘口隐含概率对比。
+
 CLI 示例：
 
 ```bash
 weather db init
-weather ensemble --city new-york --date 2026-07-05 --kind high --model gfs_seamless --save
-weather ensemble-signal --city new-york --date 2026-07-05 --kind high --model gfs_seamless --markets data/weather_market_snapshot.csv --save
+weather ensemble --city new-york --date 2026-07-05 --kind high --model ecmwf_aifs025 --save
+weather ensemble-signal --city new-york --date 2026-07-05 --kind high --model ecmwf_aifs025 --markets data/weather_market_snapshot.csv --save
 weather db runs
 weather db probabilities
 ```

@@ -199,6 +199,39 @@ class WebApiPortfolioPayloadTest(unittest.TestCase):
         self.assertEqual(FakeWeatherEnsembleProvider.kwargs["kind"], "high")
         self.assertEqual(FakeWeatherEnsembleProvider.kwargs["models"], ("ecmwf_ifs025",))
 
+    def test_ensemble_defaults_to_ecmwf_aifs(self) -> None:
+        self.assertEqual(web_api._model_from_payload({}), "ecmwf_aifs025")
+
+    def test_optional_market_buckets_can_use_city_selector_for_signal(self) -> None:
+        class FakeGammaMarketClient:
+            kwargs = None
+
+            def discover_weather_market_buckets(self, **kwargs):  # noqa: ANN003
+                type(self).kwargs = kwargs
+                return (live_bucket(),)
+
+        original_client = web_api.GammaMarketClient
+        web_api.GammaMarketClient = FakeGammaMarketClient  # type: ignore[assignment]
+        try:
+            buckets = web_api._optional_market_buckets_for_payload(
+                {
+                    "city": "Munich",
+                    "temperatureKind": "high",
+                    "targetDate": "2026-07-04",
+                    "includeOrderbooks": True,
+                },
+                unit="C",
+                allow_city_selector=True,
+            )
+        finally:
+            web_api.GammaMarketClient = original_client
+
+        self.assertEqual(len(buckets), 1)
+        self.assertEqual(FakeGammaMarketClient.kwargs["query"], "Munich high temperature")
+        self.assertEqual(FakeGammaMarketClient.kwargs["kind"], "high")
+        self.assertEqual(FakeGammaMarketClient.kwargs["target_date"], "2026-07-04")
+        self.assertTrue(FakeGammaMarketClient.kwargs["include_orderbooks"])
+
 
 if __name__ == "__main__":
     unittest.main()

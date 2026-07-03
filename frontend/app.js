@@ -71,6 +71,8 @@ function modelName(value) {
   if (model === "ecmwf_ifs025") return "ECMWF IFS 0.25";
   if (model === "ecmwf_ifs") return "ECMWF IFS HRES";
   if (model === "ecmwf_aifs025") return "ECMWF AIFS 0.25";
+  if (model === "icon_seamless") return "ICON Seamless";
+  if (model === "meteofrance_seamless") return "Meteo-France Seamless";
   if (model === "gfs_seamless") return "GFS Seamless";
   if (model === "ukmo_seamless") return "UKMO Seamless";
   if (model === "nws") return "NWS";
@@ -144,7 +146,7 @@ function marketPayload() {
 
 function selectedWeatherModels() {
   const models = Array.from($("weatherModels").selectedOptions).map((option) => option.value);
-  return models.length ? models : ["ecmwf_ifs025"];
+  return models.length ? models : ["ecmwf_ifs025", "icon_seamless", "meteofrance_seamless"];
 }
 
 function forecastPayload() {
@@ -156,7 +158,7 @@ function forecastPayload() {
   };
 }
 
-function ensemblePayload() {
+function ensemblePayload(includeMarketBuckets = false) {
   return {
     city: $("citySelect").value,
     targetDate: $("targetDate").value,
@@ -167,6 +169,7 @@ function ensemblePayload() {
     marketQuery: $("marketQuery").value,
     marketsCsv: $("marketsCsv").value,
     includeOrderbooks: $("includeOrderbooks").checked,
+    includeMarketBuckets,
     feeRate: Number($("feeRate").value),
     saveSqlite: $("saveSqlite").checked,
   };
@@ -493,7 +496,7 @@ async function fetchEnsemble(endpoint = "ensemble") {
     const response = await fetch(`${API_BASE}/api/${endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(ensemblePayload()),
+      body: JSON.stringify(ensemblePayload(endpoint === "ensemble-signal")),
     });
     const result = await readJsonResponse(response, "获取 ensemble 失败");
     renderEnsemble(result);

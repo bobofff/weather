@@ -84,7 +84,7 @@ def _model_from_payload(payload: dict[str, Any]) -> str:
     if explicit:
         return explicit
     models = _models_from_payload(payload)
-    return models[0] if models else "gfs_seamless"
+    return models[0] if models else "ecmwf_aifs025"
 
 
 def _save_requested(payload: dict[str, Any]) -> bool:
@@ -109,13 +109,22 @@ def _market_buckets_for_payload(
     return market_buckets_from_positions(positions, default_unit=unit), "positions"  # type: ignore[arg-type]
 
 
-def _optional_market_buckets_for_payload(payload: dict[str, Any], *, unit: str) -> tuple:
+def _optional_market_buckets_for_payload(
+    payload: dict[str, Any],
+    *,
+    unit: str,
+    allow_city_selector: bool = False,
+) -> tuple:
     markets_text = str(payload.get("marketsCsv") or "")
     if markets_text.strip():
         return parse_inline_market_buckets(markets_text, default_unit=unit)  # type: ignore[arg-type]
-    if _optional_text(payload.get("marketQuery") or payload.get("query")) or _optional_text(
-        payload.get("marketSlug") or payload.get("slug")
-    ) or _optional_text(payload.get("conditionId") or payload.get("condition_id")):
+    has_explicit_selector = (
+        _optional_text(payload.get("marketQuery") or payload.get("query"))
+        or _optional_text(payload.get("marketSlug") or payload.get("slug"))
+        or _optional_text(payload.get("conditionId") or payload.get("condition_id"))
+    )
+    has_city_selector = allow_city_selector and _optional_text(payload.get("city") or payload.get("cityId"))
+    if has_explicit_selector or has_city_selector:
         buckets, _selector = _load_live_market_buckets(payload)
         return buckets
     return ()
@@ -309,7 +318,12 @@ def _ensemble_payload(payload: dict[str, Any], *, include_signals: bool) -> dict
         model=model,
         forecast_days=forecast_days_int,
     )
-    market_buckets = _optional_market_buckets_for_payload(payload, unit=city.settlement_unit)
+    market_buckets = _optional_market_buckets_for_payload(
+        payload,
+        unit=city.settlement_unit,
+        allow_city_selector=include_signals
+        or _bool_value(payload.get("includeMarketBuckets"), default=False),
+    )
     buckets = tuple(item.bucket for item in market_buckets) if market_buckets else default_buckets_for_run(run)
     distribution = build_bucket_distribution(run, buckets)
     signals = ensemble_signal_rows(

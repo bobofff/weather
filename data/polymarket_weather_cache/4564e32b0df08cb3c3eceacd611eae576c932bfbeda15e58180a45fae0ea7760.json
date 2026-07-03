@@ -1,13 +1,13 @@
 {
   "daily": {
     "temperature_2m_max": [
-      22.2
+      25.5
     ],
     "temperature_2m_min": [
-      15.5
+      16.9
     ],
     "time": [
-      "2026-07-03"
+      "2026-07-04"
     ]
   },
   "daily_units": {
@@ -16,9 +16,9 @@
     "time": "iso8601"
   },
   "elevation": 524.0,
-  "generationtime_ms": 0.026226043701171875,
-  "latitude": 48.25,
-  "longitude": 11.5,
+  "generationtime_ms": 0.09000301361083984,
+  "latitude": 48.09375,
+  "longitude": 11.53125,
   "timezone": "Europe/Berlin",
   "timezone_abbreviation": "GMT+2",
   "utc_offset_seconds": 7200
