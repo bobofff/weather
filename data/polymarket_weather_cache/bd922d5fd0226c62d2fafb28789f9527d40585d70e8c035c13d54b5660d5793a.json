@@ -1,0 +1,39 @@
+{
+  "generationtime_ms": 0.20205975,
+  "results": [
+    {
+      "admin1": "Ankara",
+      "admin1_id": 323784,
+      "admin2": "Çubuk District",
+      "admin2_id": 8632045,
+      "country": "Republic of Türkiye",
+      "country_code": "TR",
+      "country_id": 298795,
+      "elevation": 942.0,
+      "feature_code": "PPL",
+      "id": 747366,
+      "latitude": 40.134,
+      "longitude": 32.98525,
+      "name": "Esenboğa",
+      "population": 1712,
+      "timezone": "Europe/Istanbul"
+    },
+    {
+      "admin1": "Ardahan",
+      "admin1_id": 862470,
+      "admin2": "Göle İlçesi",
+      "admin2_id": 8631396,
+      "country": "Republic of Türkiye",
+      "country_code": "TR",
+      "country_id": 298795,
+      "elevation": 2148.0,
+      "feature_code": "PPL",
+      "id": 747365,
+      "latitude": 40.74298,
+      "longitude": 42.68535,
+      "name": "Esenboğaz",
+      "population": 248,
+      "timezone": "Europe/Istanbul"
+    }
+  ]
+}

@@ -25,7 +25,7 @@ from weather_quant.models import (
     TemperatureBucket,
 )
 from weather_quant.storage import WeatherStorage
-from weather_quant.weather import OpenMeteoEnsembleClient
+from weather_quant.weather import OpenMeteoEnsembleClient, OpenMeteoForecastClient
 
 
 def city() -> CityConfig:
@@ -202,8 +202,15 @@ class EnsembleProbabilityTest(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["executableEntryCost"], 0.20)
         self.assertAlmostEqual(rows[0]["fee"], 0.008)
         self.assertAlmostEqual(rows[0]["expectedExitCost"], 0.01)
+        self.assertAlmostEqual(rows[0]["marketImpliedProbability"], 0.19)
+        self.assertAlmostEqual(rows[0]["rawEdge"], 1 / 3 - 0.19)
+        self.assertAlmostEqual(rows[0]["spread"], 0.02)
+        self.assertEqual(rows[0]["bestAskSize"], 100)
+        self.assertEqual(rows[0]["askDepth"], 100)
         self.assertAlmostEqual(rows[0]["edge"], 1 / 3 - 0.20 - 0.008 - 0.01)
+        self.assertGreater(rows[0]["signalScore"], 75)
         self.assertEqual(rows[0]["recommendation"], "BUY_YES")
+        self.assertEqual(rows[0]["reason"], "executable edge clears threshold")
 
     def test_sqlite_init_comments_and_storage_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -325,6 +332,96 @@ class EnsembleProbabilityTest(unittest.TestCase):
         self.assertAlmostEqual(run.daily_values[0].value, 83.0)
         self.assertEqual(fake_http.path, "/v1/ensemble")
         self.assertEqual(fake_http.params["models"], "ecmwf_ifs025")
+
+    def test_open_meteo_clients_forward_location_options(self) -> None:
+        class FakeForecastHttp:
+            params = None
+
+            def get_json(self, path, *, params=None, headers=None):  # noqa: ANN001, ANN003
+                self.path = path
+                self.params = params
+                return {
+                    "daily_units": {"temperature_2m_max": "°C"},
+                    "daily": {
+                        "time": ["2026-07-05"],
+                        "temperature_2m_max": [24.0],
+                        "temperature_2m_min": [18.0],
+                    },
+                }
+
+        custom_city = CityConfig(
+            city_id="custom",
+            name="Custom",
+            latitude=48.3538,
+            longitude=11.7861,
+            timezone="Europe/Berlin",
+            settlement_unit="C",
+            elevation=453.0,
+            cell_selection="nearest",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_http = FakeForecastHttp()
+            client = OpenMeteoForecastClient(
+                http_client=fake_http,  # type: ignore[arg-type]
+                cache=FileCache(Path(tmpdir) / "cache"),
+            )
+            client.fetch_point(
+                custom_city,
+                target_date=date(2026, 7, 5),
+                kind="high",
+                model="icon_seamless",
+            )
+
+        self.assertEqual(fake_http.path, "/v1/forecast")
+        self.assertEqual(fake_http.params["elevation"], 453.0)
+        self.assertEqual(fake_http.params["cell_selection"], "nearest")
+        self.assertEqual(fake_http.params["temperature_unit"], "celsius")
+
+    def test_open_meteo_ensemble_client_forwards_location_options(self) -> None:
+        class FakeEnsembleHttp:
+            params = None
+
+            def get_json(self, path, *, params=None, headers=None):  # noqa: ANN001, ANN003
+                self.path = path
+                self.params = params
+                return {
+                    "timezone": "Europe/Berlin",
+                    "hourly_units": {"temperature_2m_member01": "°C"},
+                    "hourly": {
+                        "time": ["2026-07-05T00:00", "2026-07-05T12:00"],
+                        "temperature_2m_member01": [18.0, 24.0],
+                    },
+                }
+
+        custom_city = CityConfig(
+            city_id="custom",
+            name="Custom",
+            latitude=48.3538,
+            longitude=11.7861,
+            timezone="Europe/Berlin",
+            settlement_unit="C",
+            elevation=453.0,
+            cell_selection="nearest",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_http = FakeEnsembleHttp()
+            client = OpenMeteoEnsembleClient(
+                http_client=fake_http,  # type: ignore[arg-type]
+                cache=FileCache(Path(tmpdir) / "cache"),
+            )
+            client.fetch_run(
+                custom_city,
+                target_date=date(2026, 7, 5),
+                kind="high",
+                model="ecmwf_ifs025",
+            )
+
+        self.assertEqual(fake_http.path, "/v1/ensemble")
+        self.assertEqual(fake_http.params["elevation"], 453.0)
+        self.assertEqual(fake_http.params["cell_selection"], "nearest")
+        self.assertEqual(fake_http.params["temperature_unit"], "celsius")
 
     def test_open_meteo_ensemble_client_uses_ensemble_api_host_by_default(self) -> None:
         client = OpenMeteoEnsembleClient()

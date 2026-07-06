@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>城市配置 - Polymarket 天气组合锁利</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-layout">
+      <aside class="sidebar" aria-label="主菜单">
+        <a class="brand" href="/">
+          <span class="brand-mark">WQ</span>
+          <span>
+            <strong>天气锁利</strong>
+            <small>Weather Quant</small>
+          </span>
+        </a>
+        <nav class="side-menu">
+          <a href="/">组合面板</a>
+          <a class="active" href="/cities.html">城市配置</a>
+        </nav>
+      </aside>
+
+      <main id="top" class="shell">
+        <header class="topbar">
+          <div>
+            <h1>城市配置</h1>
+            <p>维护结算站、站点坐标、单位、海拔和格点配置。</p>
+          </div>
+          <button id="newCityButton" class="secondary" type="button">新城市</button>
+        </header>
+
+        <section id="notice" class="notice" hidden></section>
+
+        <section id="city-panel" class="panel">
+          <div class="panel-head">
+            <h2>城市列表</h2>
+          </div>
+          <div id="cityList" class="city-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="city-editor">
+            <h3>编辑城市 <span id="editingCityLabel" class="editor-label"></span></h3>
+            <div class="market-grid">
+              <label>城市 ID
+                <input id="cityIdInput" type="text" autocomplete="off" placeholder="ankara">
+              </label>
+              <label>名称
+                <input id="cityNameInput" type="text" autocomplete="off" placeholder="Ankara">
+              </label>
+              <label>纬度
+                <input id="latitude" type="number" step="0.0001" min="-90" max="90" autocomplete="off">
+              </label>
+              <label>经度
+                <input id="longitude" type="number" step="0.0001" min="-180" max="180" autocomplete="off">
+              </label>
+              <label>时区
+                <input id="timezone" type="text" autocomplete="off" placeholder="auto">
+              </label>
+              <label>单位
+                <select id="cityUnit">
+                  <option value="C">C</option>
+                  <option value="F">F</option>
+                </select>
+              </label>
+              <label>结算站
+                <input id="settlementStation" type="text" autocomplete="off">
+              </label>
+              <label>站点 ID
+                <input id="stationId" type="text" autocomplete="off">
+              </label>
+              <button id="lookupStationButton" class="secondary" type="button">查坐标</button>
+              <label>粒度
+                <select id="forecastGranularity">
+                  <option value="city">城市</option>
+                  <option value="station">站点</option>
+                </select>
+              </label>
+              <label>海拔
+                <input id="elevation" type="number" step="1" autocomplete="off">
+              </label>
+              <label>格点
+                <select id="cellSelection">
+                  <option value="">默认</option>
+                  <option value="land">陆地</option>
+                  <option value="nearest">最近</option>
+                  <option value="sea">海上</option>
+                </select>
+              </label>
+              <button id="saveCityButton" type="button">保存城市</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/cities.js"></script>
+  </body>
+</html>

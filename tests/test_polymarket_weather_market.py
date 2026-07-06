@@ -271,6 +271,58 @@ class MarketParsingTest(unittest.TestCase):
             [call["title_search"] for call in http.calls],
         )
 
+    def test_discover_weather_buckets_falls_back_from_generated_temperature_query(self) -> None:
+        class FakeCache:
+            def get(self, key, *, max_age_seconds=None):  # noqa: ANN001
+                return None
+
+            def set(self, key, value):  # noqa: ANN001
+                return None
+
+        class FakeHttpClient:
+            calls = []
+
+            def get_json(self, path: str, *, params=None, headers=None):  # noqa: ANN001
+                self.calls.append(dict(params or {}))
+                if params and params.get("title_search") == "Shanghai temperature":
+                    return {
+                        "events": [
+                            {
+                                "id": "event-1",
+                                "title": "Shanghai weather July 3",
+                                "markets": [
+                                    {
+                                        "id": "1",
+                                        "question": "Will the highest temperature in Shanghai be 33°C on July 3?",
+                                        "slug": "shanghai-33",
+                                        "outcomes": '["Yes", "No"]',
+                                        "outcomePrices": '["0.36", "0.64"]',
+                                        "clobTokenIds": '["yes", "no"]',
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                return {"events": []}
+
+        http = FakeHttpClient()
+        client = GammaMarketClient(http_client=http, cache=FakeCache())
+
+        buckets = client.discover_weather_market_buckets(
+            query="Shanghai high temperature",
+            default_unit="C",
+            kind="high",
+            target_date="2026-07-03",
+        )
+
+        self.assertEqual(len(buckets), 1)
+        self.assertEqual(buckets[0].token_id, "yes")
+        self.assertEqual(http.calls[0]["title_search"], "Shanghai high temperature")
+        self.assertIn(
+            "Shanghai temperature",
+            [call["title_search"] for call in http.calls],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

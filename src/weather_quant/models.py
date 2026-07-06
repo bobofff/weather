@@ -71,6 +71,8 @@ class CityConfig:
     model_weights: Mapping[str, float] = field(default_factory=dict)
     model_error_std: float = 2.5
     min_distribution_std: float = 1.0
+    elevation: float | None = None
+    cell_selection: Literal["land", "sea", "nearest"] | None = None
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const API_BASE = window.WEATHER_API_BASE || window.location.origin;
+const SELECTED_CITY_STORAGE_KEY = "weatherSelectedCityId";
+let cityRecords = [];
 
 const samplePositions = `outcome,shares,total_cost,price,best_bid,best_ask,probability
 84 to 85,100,32,0.50,0.46,0.54,0.34
@@ -31,6 +33,18 @@ function pct(value) {
   return `${(Number(value) * 100).toFixed(2)}%`;
 }
 
+function numberValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function signedPct(value) {
+  const number = numberValue(value);
+  if (number === null) return "-";
+  return `${number > 0 ? "+" : ""}${(number * 100).toFixed(2)}%`;
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -45,6 +59,30 @@ function todayLocalISO() {
   const now = new Date();
   const offsetMs = now.getTimezoneOffset() * 60 * 1000;
   return new Date(now.getTime() - offsetMs).toISOString().slice(0, 10);
+}
+
+function formatLocalTime(timezone) {
+  const zone = String(timezone || "").trim();
+  if (!zone || zone.toLowerCase() === "auto") return "-";
+  try {
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZoneName: "shortOffset",
+    }).formatToParts(new Date());
+    const value = (type) => parts.find((part) => part.type === type)?.value || "";
+    const date = `${value("year")}-${value("month")}-${value("day")}`;
+    const time = `${value("hour")}:${value("minute")}`;
+    const offset = value("timeZoneName");
+    return `${date} ${time}${offset ? ` ${offset}` : ""}`;
+  } catch {
+    return "-";
+  }
 }
 
 function sourceName(value) {
@@ -64,6 +102,43 @@ function methodName(value) {
 
 function kindName(value) {
   return String(value || "") === "low" ? "最低温" : "最高温";
+}
+
+function actionName(value) {
+  const action = String(value || "");
+  if (action === "BUY_YES") return "买入";
+  if (action === "WATCH") return "观察";
+  if (action === "SKIP_NO_ASK") return "无 ask";
+  if (action === "SKIP_NO_EDGE") return "不交易";
+  return action || "-";
+}
+
+function actionTone(value) {
+  const action = String(value || "");
+  if (action === "BUY_YES") return "";
+  if (action === "WATCH") return "warn";
+  return "danger";
+}
+
+function scoreTone(value) {
+  const score = numberValue(value);
+  if (score === null) return "";
+  if (score >= 75) return "good";
+  if (score >= 55) return "watch";
+  return "bad";
+}
+
+function reasonName(value) {
+  const reason = String(value || "");
+  const labels = {
+    "missing executable ask": "缺少可执行 ask",
+    "edge clears threshold, but spread is wide": "edge 达标，价差偏宽",
+    "executable edge clears threshold": "可执行 edge 达标",
+    "model is above market midpoint, but executable edge is below threshold": "模型高于市场中点，但可执行 edge 不足",
+    "market price is above model fair probability": "市场价格高于模型 fair price",
+    "edge below threshold": "edge 未达阈值",
+  };
+  return labels[reason] || reason || "-";
 }
 
 function modelName(value) {
@@ -104,11 +179,63 @@ function selectedCityOption() {
   return $("citySelect").selectedOptions[0];
 }
 
+function savedCityId() {
+  try {
+    return window.localStorage.getItem(SELECTED_CITY_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberCityId(cityId) {
+  try {
+    if (cityId) {
+      window.localStorage.setItem(SELECTED_CITY_STORAGE_KEY, cityId);
+    } else {
+      window.localStorage.removeItem(SELECTED_CITY_STORAGE_KEY);
+    }
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+}
+
+function selectedCityRecord() {
+  return cityRecords.find((city) => city.cityId === $("citySelect").value) || null;
+}
+
+function marketCityValue() {
+  return selectedCityRecord()?.name || $("citySelect").value;
+}
+
 function syncUnitFromCity() {
+  const city = selectedCityRecord();
+  if (city) {
+    $("unit").value = city.settlementUnit || "F";
+    rememberCityId(city.cityId);
+    return;
+  }
   const unit = selectedCityOption()?.dataset.unit;
   if (unit) {
     $("unit").value = unit;
   }
+}
+
+function customLocationPayload() {
+  const city = selectedCityRecord();
+  return {
+    useStoredCity: true,
+    locationId: city?.cityId || $("citySelect").value,
+    locationName: city?.name || "",
+    latitude: city?.latitude ?? "",
+    longitude: city?.longitude ?? "",
+    timezone: city?.timezone || "auto",
+    settlementUnit: city?.settlementUnit || $("unit").value,
+    settlementStation: city?.settlementStation || "",
+    stationId: city?.stationId || "",
+    forecastGranularity: city?.forecastGranularity || "city",
+    elevation: city?.elevation ?? "",
+    cellSelection: city?.cellSelection || "",
+  };
 }
 
 function payload() {
@@ -117,7 +244,7 @@ function payload() {
     marketsCsv: $("marketsCsv").value,
     marketSlug: $("marketSlug").value,
     conditionId: $("conditionId").value,
-    city: $("citySelect").value,
+    city: marketCityValue(),
     marketQuery: $("marketQuery").value,
     targetDate: $("targetDate").value,
     temperatureKind: $("temperatureKind").value,
@@ -132,15 +259,17 @@ function payload() {
 }
 
 function marketPayload() {
+  const city = selectedCityRecord();
   return {
+    ...customLocationPayload(),
     marketSlug: $("marketSlug").value,
     conditionId: $("conditionId").value,
-    city: $("citySelect").value,
+    city: marketCityValue(),
     marketQuery: $("marketQuery").value,
     targetDate: $("targetDate").value,
     temperatureKind: $("temperatureKind").value,
     includeOrderbooks: $("includeOrderbooks").checked,
-    unit: $("unit").value,
+    unit: city?.settlementUnit || $("unit").value,
   };
 }
 
@@ -150,8 +279,11 @@ function selectedWeatherModels() {
 }
 
 function forecastPayload() {
+  const city = selectedCityRecord();
   return {
     city: $("citySelect").value,
+    ...customLocationPayload(),
+    unit: city?.settlementUnit || $("unit").value,
     targetDate: $("targetDate").value,
     temperatureKind: $("temperatureKind").value,
     models: selectedWeatherModels(),
@@ -159,8 +291,11 @@ function forecastPayload() {
 }
 
 function ensemblePayload(includeMarketBuckets = false) {
+  const city = selectedCityRecord();
   return {
     city: $("citySelect").value,
+    ...customLocationPayload(),
+    unit: city?.settlementUnit || $("unit").value,
     targetDate: $("targetDate").value,
     temperatureKind: $("temperatureKind").value,
     model: $("ensembleModel").value,
@@ -171,6 +306,7 @@ function ensemblePayload(includeMarketBuckets = false) {
     includeOrderbooks: $("includeOrderbooks").checked,
     includeMarketBuckets,
     feeRate: Number($("feeRate").value),
+    minEdge: Number($("minEdge").value),
     saveSqlite: $("saveSqlite").checked,
   };
 }
@@ -187,7 +323,10 @@ function renderForecast(result) {
   const summary = result.summary;
   const metricHtml = [
     metric("城市", summary.cityName || summary.cityId || "-"),
+    metric("坐标", `${price(summary.latitude)}, ${price(summary.longitude)}`),
+    metric("时区", summary.timezone || "-"),
     metric("日期", summary.targetDate || "-"),
+    metric("当地时间", formatLocalTime(summary.timezone)),
     metric("类型", kindName(summary.kind)),
     metric("均值", temperature(summary.mean, summary.unit)),
     metric("范围", `${temperature(summary.min, summary.unit)} / ${temperature(summary.max, summary.unit)}`),
@@ -263,6 +402,8 @@ function probabilityChart(chart) {
 function renderEnsemble(result) {
   const summary = result.summary;
   const metrics = [
+    metric("地点", summary.cityName || summary.cityId || "-"),
+    metric("坐标", `${price(summary.latitude)}, ${price(summary.longitude)}`),
     metric("成员数", summary.memberCount ?? "-"),
     metric("未命中", summary.unmatchedCount ?? "-"),
     metric("均值", temperature(summary.empiricalMean, summary.unit)),
@@ -278,25 +419,91 @@ function renderEnsemble(result) {
     <td>${money(row.totalMembers)}</td>
     <td>${pct(row.probability)}</td>
   </tr>`);
-  const signalRows = (result.signals || []).map((row) => `<tr>
-    <td>${escapeHtml(row.outcome)}</td>
-    <td>${pct(row.ensembleProbability)}</td>
-    <td>${price(row.marketMidpoint)}</td>
-    <td>${price(row.bestBid)}</td>
-    <td>${price(row.bestAsk)}</td>
-    <td>${price(row.executableEntryCost)}</td>
-    <td>${price(row.fee)}</td>
-    <td>${price(row.expectedExitCost)}</td>
-    <td>${pct(row.edge)}</td>
-    <td><span class="badge ${row.recommendation === "BUY_YES" ? "" : "warn"}">${escapeHtml(row.recommendation)}</span></td>
-  </tr>`);
   $("ensembleProbability").innerHTML = `
     <div class="metrics">${metrics}</div>
     ${probabilityChart(result.chart || {})}
     ${table(["温度桶", "命中", "成员", "概率"], probabilityRows)}
-    ${signalRows.length ? table(["Outcome", "Ens prob", "mid", "bid", "ask", "entry", "fee", "exit cost", "edge", "action"], signalRows) : ""}
   `;
+  renderSignalPanel(result.signals || [], summary);
   showNotice(`已生成 ${summary.model} ensemble 经验分布。`);
+}
+
+function signalWithDerived(row) {
+  const edge = numberValue(row.edge);
+  const ensembleProbability = numberValue(row.ensembleProbability);
+  const marketImplied = numberValue(row.marketImpliedProbability ?? row.marketMidpoint);
+  const bestBid = numberValue(row.bestBid);
+  const bestAsk = numberValue(row.bestAsk);
+  const spread = numberValue(row.spread) ?? (
+    bestBid !== null && bestAsk !== null ? Math.max(0, bestAsk - bestBid) : null
+  );
+  const rawEdge = numberValue(row.rawEdge) ?? (
+    ensembleProbability !== null && marketImplied !== null
+      ? ensembleProbability - marketImplied
+      : null
+  );
+  const score = numberValue(row.signalScore) ?? Math.round(Math.max(
+    0,
+    Math.min(
+      100,
+      50
+        + (edge ?? 0) * 600
+        + (rawEdge ?? 0) * 180
+        - (spread ?? 0) * 200,
+    ),
+  ));
+  return {
+    ...row,
+    _edge: edge,
+    _marketImplied: marketImplied,
+    _rawEdge: rawEdge,
+    _score: score,
+    _spread: spread,
+  };
+}
+
+function renderSignalPanel(signals, summary) {
+  const target = $("signalScore");
+  if (!target) return;
+  const rows = signals
+    .map(signalWithDerived)
+    .sort((left, right) => (right._score - left._score) || ((right._edge ?? -1) - (left._edge ?? -1)));
+  const top = rows[0] || null;
+  const buyCount = rows.filter((row) => row.recommendation === "BUY_YES").length;
+  const watchCount = rows.filter((row) => row.recommendation === "WATCH").length;
+  const metrics = [
+    metric("最佳桶", top?.outcome || "-"),
+    metric("当地时间", formatLocalTime(summary.timezone)),
+    metric("评分", top ? String(top._score) : "-", top ? scoreTone(top._score) : ""),
+    metric("可执行 Edge", top ? signedPct(top._edge) : "-"),
+    metric("动作", top ? actionName(top.recommendation) : "-"),
+    metric("买入候选", buyCount),
+    metric("观察候选", watchCount),
+    metric("市场桶数", summary.marketBucketCount ?? rows.length),
+    metric("最小 Edge", pct($("minEdge")?.value || 0.03)),
+  ].join("");
+  const tableRows = rows.map((row) => `<tr>
+    <td><span class="score-pill ${scoreTone(row._score)}">${escapeHtml(row._score)}</span></td>
+    <td>${escapeHtml(row.outcome)}</td>
+    <td>${pct(row.ensembleProbability)}</td>
+    <td>${pct(row._marketImplied)}</td>
+    <td>${signedPct(row._rawEdge)}</td>
+    <td>${price(row.executableEntryCost)}</td>
+    <td>${price((numberValue(row.fee) ?? 0) + (numberValue(row.expectedExitCost) ?? 0))}</td>
+    <td>${signedPct(row._edge)}</td>
+    <td>${price(row.bestBid)} / ${price(row.bestAsk)}</td>
+    <td>${price(row._spread)}</td>
+    <td>${money(row.askDepth)}</td>
+    <td><span class="badge ${actionTone(row.recommendation)}">${escapeHtml(actionName(row.recommendation))}</span></td>
+    <td>${escapeHtml(reasonName(row.reason))}</td>
+  </tr>`);
+  target.innerHTML = `
+    <div class="metrics">${metrics}</div>
+    <div class="signal-table">${table(
+      ["评分", "温度桶", "模型概率", "市场隐含", "Raw edge", "入场", "成本", "Edge", "Bid / Ask", "Spread", "Ask 深度", "动作", "原因"],
+      tableRows,
+    )}</div>
+  `;
 }
 
 function renderHistory(runsResult, probabilitiesResult) {
@@ -318,11 +525,13 @@ function renderHistory(runsResult, probabilitiesResult) {
 
 function renderMarkets(result) {
   const summary = result.summary;
+  const timezone = summary.timezone || selectedCityRecord()?.timezone;
   const metricHtml = [
     metric("盘口来源", sourceName(summary.marketSource)),
     metric("发现方式", methodName(summary.selector?.method)),
     metric("类型", summary.selector?.kind === "low" ? "最低温" : "最高温"),
     metric("日期", summary.selector?.targetDate || "-"),
+    metric("当地时间", formatLocalTime(timezone)),
     metric("市场桶数", summary.marketCount ?? "-"),
     metric("Bid sum", price(summary.bidSum)),
     metric("Ask sum", price(summary.askSum)),
@@ -467,6 +676,27 @@ async function fetchMarkets() {
   }
 }
 
+async function loadCities(selectedCityId = savedCityId() || $("citySelect").value) {
+  try {
+    const response = await fetch(`${API_BASE}/api/cities`);
+    const result = await readJsonResponse(response, "读取城市失败");
+    cityRecords = result.cities || [];
+    const selected = cityRecords.some((city) => city.cityId === selectedCityId)
+      ? selectedCityId
+      : cityRecords[0]?.cityId;
+    $("citySelect").innerHTML = cityRecords.map((city) => (
+      `<option value="${escapeHtml(city.cityId)}" data-unit="${escapeHtml(city.settlementUnit)}">${escapeHtml(city.name)}</option>`
+    )).join("");
+    if (selected) {
+      $("citySelect").value = selected;
+      rememberCityId(selected);
+      syncUnitFromCity();
+    }
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
 async function fetchForecast() {
   const button = $("fetchForecastButton");
   button.disabled = true;
@@ -541,14 +771,18 @@ async function run() {
   }
 }
 
-$("positionsCsv").placeholder = samplePositions;
-$("marketsCsv").placeholder = sampleMarkets;
-$("targetDate").value = todayLocalISO();
-$("citySelect").addEventListener("change", syncUnitFromCity);
-syncUnitFromCity();
-$("fetchForecastButton").addEventListener("click", fetchForecast);
-$("fetchEnsembleButton").addEventListener("click", () => fetchEnsemble("ensemble"));
-$("fetchEnsembleSignalButton").addEventListener("click", () => fetchEnsemble("ensemble-signal"));
-$("fetchMarketButton").addEventListener("click", fetchMarkets);
-$("runButton").addEventListener("click", run);
-void loadHistory();
+async function init() {
+  $("positionsCsv").placeholder = samplePositions;
+  $("marketsCsv").placeholder = sampleMarkets;
+  $("targetDate").value = todayLocalISO();
+  $("citySelect").addEventListener("change", syncUnitFromCity);
+  $("fetchForecastButton").addEventListener("click", fetchForecast);
+  $("fetchEnsembleButton").addEventListener("click", () => fetchEnsemble("ensemble"));
+  $("fetchEnsembleSignalButton").addEventListener("click", () => fetchEnsemble("ensemble-signal"));
+  $("fetchMarketButton").addEventListener("click", fetchMarkets);
+  $("runButton").addEventListener("click", run);
+  await loadCities();
+  await loadHistory();
+}
+
+void init();

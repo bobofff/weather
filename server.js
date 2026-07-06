@@ -165,6 +165,18 @@ const backendServer = createServer((req, res) => {
     void handleApi(req, res, "ensemble-signal");
     return;
   }
+  if (req.method === "GET" && req.url?.startsWith("/api/cities")) {
+    void handleApi(req, res, "cities");
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/cities") {
+    void handleApi(req, res, "city-save");
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/station-lookup") {
+    void handleApi(req, res, "station-lookup");
+    return;
+  }
   if (req.method === "GET" && req.url?.startsWith("/api/db/runs")) {
     void handleApi(req, res, "db-runs");
     return;
@@ -202,6 +214,18 @@ const frontendServer = createServer((req, res) => {
   }
   if (req.method === "POST" && req.url === "/api/ensemble-signal") {
     void handleApi(req, res, "ensemble-signal");
+    return;
+  }
+  if (req.method === "GET" && req.url?.startsWith("/api/cities")) {
+    void handleApi(req, res, "cities");
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/cities") {
+    void handleApi(req, res, "city-save");
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/station-lookup") {
+    void handleApi(req, res, "station-lookup");
     return;
   }
   if (req.method === "GET" && req.url?.startsWith("/api/db/runs")) {

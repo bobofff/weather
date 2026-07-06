@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from typing import Any
@@ -448,23 +449,80 @@ def _weather_event_queries(
     base = " ".join(query.strip().split())
     if not base:
         return ()
-    lowered = base.lower()
-    if any(token in lowered for token in ("temperature", "weather", "temp", "°f", "°c")):
-        return (base,)
     kind_words = _kind_search_words(kind)
     date_words = _date_search_words(target_date)
     specific: list[str] = []
-    for kind_word in kind_words:
+    stems = _weather_query_stems(base, target_date=target_date)
+    search_stems = stems[1:] if len(stems) > 1 else stems
+    for stem in search_stems:
+        specific.append(stem)
+        for kind_word in kind_words:
+            if date_words:
+                for date_word in date_words:
+                    specific.append(f"{stem} {kind_word} temperature {date_word}")
+            specific.append(f"{stem} {kind_word} temperature")
         if date_words:
             for date_word in date_words:
-                specific.append(f"{base} {kind_word} temperature {date_word}")
-        specific.append(f"{base} {kind_word} temperature")
-    return tuple(dict.fromkeys((
-        base,
-        *specific,
-        f"{base} temperature",
-        f"{base} weather",
-    )))
+                specific.append(f"{stem} temperature {date_word}")
+                specific.append(f"{stem} weather {date_word}")
+        specific.append(f"{stem} temperature")
+        specific.append(f"{stem} weather")
+    return tuple(dict.fromkeys((base, *specific)))
+
+
+def _weather_query_stems(
+    query: str,
+    *,
+    target_date: str | date | None,
+) -> tuple[str, ...]:
+    stems = [query]
+    stripped = _strip_weather_query_terms(query, target_date=target_date)
+    if stripped and stripped != query:
+        stems.append(stripped)
+    return tuple(dict.fromkeys(stems))
+
+
+def _strip_weather_query_terms(
+    query: str,
+    *,
+    target_date: str | date | None,
+) -> str:
+    text = f" {query} "
+    for date_word in _date_search_words(target_date):
+        text = re.sub(
+            rf"\b(?:on\s+)?{re.escape(date_word)}\b",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+    text = re.sub(
+        r"\b(?:highest|lowest|maximum|minimum|max|min|high|low)\s+"
+        r"(?:temperature|weather|temp|degrees?|fahrenheit|celsius)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:temperature|weather|temp)\s+"
+        r"(?:highest|lowest|maximum|minimum|max|min|high|low)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:highest|lowest|maximum|minimum)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:temperature|weather|temp|degrees?|fahrenheit|celsius)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"[°][fc]\b", " ", text, flags=re.IGNORECASE)
+    return " ".join(text.split())
 
 
 def _kind_search_words(kind: str | None) -> tuple[str, ...]:

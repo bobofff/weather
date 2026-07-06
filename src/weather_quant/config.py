@@ -227,6 +227,9 @@ def city_from_mapping(city_id: str, payload: Mapping[str, Any]) -> CityConfig:
         str(key): float(value)
         for key, value in weights_payload.items()
     } if isinstance(weights_payload, Mapping) else {}
+    cell_selection = str(payload.get("cell_selection") or "").strip().lower() or None
+    if cell_selection not in {None, "land", "sea", "nearest"}:
+        raise ValueError("cell_selection must be land, sea, or nearest.")
 
     return CityConfig(
         city_id=city_id,
@@ -249,6 +252,12 @@ def city_from_mapping(city_id: str, payload: Mapping[str, Any]) -> CityConfig:
         model_weights=weights,
         model_error_std=float(payload.get("model_error_std", 2.5)),
         min_distribution_std=float(payload.get("min_distribution_std", 1.0)),
+        elevation=(
+            float(payload["elevation"])
+            if payload.get("elevation") not in (None, "")
+            else None
+        ),
+        cell_selection=cell_selection,  # type: ignore[arg-type]
     )
 
 

@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from weather_quant.config import DEFAULT_CITY_CONFIGS
 from weather_quant.db import connect_database, init_database
 from weather_quant.ensemble import stable_payload_hash
-from weather_quant.models import EnsembleDistribution, MarketBucket
+from weather_quant.models import CityConfig, EnsembleDistribution, MarketBucket
 from weather_quant.portfolio import (
     market_best_ask,
     market_best_bid,
@@ -30,6 +31,58 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _city_to_payload(city: CityConfig, *, is_builtin: bool, sort_order: int) -> dict[str, Any]:
+    return {
+        "cityId": city.city_id,
+        "name": city.name,
+        "latitude": city.latitude,
+        "longitude": city.longitude,
+        "timezone": city.timezone,
+        "settlementStation": city.settlement_station,
+        "stationId": city.station_id,
+        "metarSource": city.metar_source,
+        "forecastGranularity": city.forecast_granularity,
+        "settlementUnit": city.settlement_unit,
+        "weatherModels": list(city.weather_models),
+        "modelWeights": dict(city.model_weights),
+        "modelErrorStd": city.model_error_std,
+        "minDistributionStd": city.min_distribution_std,
+        "elevation": city.elevation,
+        "cellSelection": city.cell_selection,
+        "isBuiltin": is_builtin,
+        "sortOrder": sort_order,
+    }
+
+
+def _city_from_row(row: Any) -> CityConfig:
+    return CityConfig(
+        city_id=str(row["city_id"]),
+        name=str(row["name"]),
+        latitude=float(row["latitude"]),
+        longitude=float(row["longitude"]),
+        timezone=str(row["timezone"]),
+        settlement_station=row["settlement_station"],
+        station_id=row["station_id"],
+        metar_source=row["metar_source"],
+        forecast_granularity=row["forecast_granularity"],
+        settlement_unit=row["settlement_unit"],
+        weather_models=tuple(json.loads(row["weather_models_json"] or "[]")),
+        model_weights=json.loads(row["model_weights_json"] or "{}"),
+        model_error_std=float(row["model_error_std"]),
+        min_distribution_std=float(row["min_distribution_std"]),
+        elevation=row["elevation"],
+        cell_selection=row["cell_selection"],
+    )
+
+
+def _city_payload_from_row(row: Any) -> dict[str, Any]:
+    return _city_to_payload(
+        _city_from_row(row),
+        is_builtin=bool(row["is_builtin"]),
+        sort_order=int(row["sort_order"]),
+    )
+
+
 class WeatherStorage:
     """SQLite-backed storage for ensemble runs and trading snapshots."""
 
@@ -40,6 +93,148 @@ class WeatherStorage:
 
     def _ensure_schema(self) -> None:
         init_database(self.path)
+
+    def _seed_default_cities(self) -> None:
+        self._ensure_schema()
+        timestamp = _now()
+        with connect_database(self.path) as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO weather_cities (
+                  city_id, name, latitude, longitude, timezone, settlement_station,
+                  station_id, metar_source, forecast_granularity, settlement_unit,
+                  weather_models_json, model_weights_json, model_error_std,
+                  min_distribution_std, elevation, cell_selection, is_builtin,
+                  sort_order, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        city.city_id,
+                        city.name,
+                        city.latitude,
+                        city.longitude,
+                        city.timezone,
+                        city.settlement_station,
+                        city.station_id,
+                        city.metar_source,
+                        city.forecast_granularity,
+                        city.settlement_unit,
+                        _json(list(city.weather_models)),
+                        _json(dict(city.model_weights)),
+                        city.model_error_std,
+                        city.min_distribution_std,
+                        city.elevation,
+                        city.cell_selection,
+                        1,
+                        index,
+                        timestamp,
+                        timestamp,
+                    )
+                    for index, city in enumerate(DEFAULT_CITY_CONFIGS.values())
+                ],
+            )
+            connection.commit()
+
+    def list_cities(self) -> list[dict[str, Any]]:
+        self._seed_default_cities()
+        with connect_database(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM weather_cities
+                ORDER BY sort_order ASC, name COLLATE NOCASE ASC
+                """
+            ).fetchall()
+        return [_city_payload_from_row(row) for row in rows]
+
+    def get_city(self, city_id_or_name: str) -> CityConfig | None:
+        self._seed_default_cities()
+        text = city_id_or_name.strip()
+        with connect_database(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM weather_cities
+                WHERE lower(city_id) = lower(?) OR lower(name) = lower(?)
+                LIMIT 1
+                """,
+                (text, text),
+            ).fetchone()
+        return _city_from_row(row) if row else None
+
+    def save_city(self, city: CityConfig, *, is_builtin: bool | None = None) -> dict[str, Any]:
+        self._seed_default_cities()
+        timestamp = _now()
+        with connect_database(self.path) as connection:
+            existing = connection.execute(
+                "SELECT is_builtin, sort_order, created_at FROM weather_cities WHERE city_id = ?",
+                (city.city_id,),
+            ).fetchone()
+            builtin_value = int(is_builtin) if is_builtin is not None else (
+                int(existing["is_builtin"]) if existing else 0
+            )
+            sort_order = int(existing["sort_order"]) if existing else 10_000
+            created_at = str(existing["created_at"]) if existing else timestamp
+            connection.execute(
+                """
+                INSERT INTO weather_cities (
+                  city_id, name, latitude, longitude, timezone, settlement_station,
+                  station_id, metar_source, forecast_granularity, settlement_unit,
+                  weather_models_json, model_weights_json, model_error_std,
+                  min_distribution_std, elevation, cell_selection, is_builtin,
+                  sort_order, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(city_id) DO UPDATE SET
+                  name = excluded.name,
+                  latitude = excluded.latitude,
+                  longitude = excluded.longitude,
+                  timezone = excluded.timezone,
+                  settlement_station = excluded.settlement_station,
+                  station_id = excluded.station_id,
+                  metar_source = excluded.metar_source,
+                  forecast_granularity = excluded.forecast_granularity,
+                  settlement_unit = excluded.settlement_unit,
+                  weather_models_json = excluded.weather_models_json,
+                  model_weights_json = excluded.model_weights_json,
+                  model_error_std = excluded.model_error_std,
+                  min_distribution_std = excluded.min_distribution_std,
+                  elevation = excluded.elevation,
+                  cell_selection = excluded.cell_selection,
+                  is_builtin = excluded.is_builtin,
+                  sort_order = excluded.sort_order,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    city.city_id,
+                    city.name,
+                    city.latitude,
+                    city.longitude,
+                    city.timezone,
+                    city.settlement_station,
+                    city.station_id,
+                    city.metar_source,
+                    city.forecast_granularity,
+                    city.settlement_unit,
+                    _json(list(city.weather_models)),
+                    _json(dict(city.model_weights)),
+                    city.model_error_std,
+                    city.min_distribution_std,
+                    city.elevation,
+                    city.cell_selection,
+                    builtin_value,
+                    sort_order,
+                    created_at,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+        row = self.get_city(city.city_id)
+        if row is None:
+            raise RuntimeError(f"Saved city not found: {city.city_id}")
+        return _city_to_payload(row, is_builtin=bool(builtin_value), sort_order=sort_order)
 
     def save_distribution(self, distribution: EnsembleDistribution) -> str:
         self._ensure_schema()

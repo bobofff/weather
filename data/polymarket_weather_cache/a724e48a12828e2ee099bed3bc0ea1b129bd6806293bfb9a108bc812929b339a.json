@@ -1,0 +1,20 @@
+[
+  {
+    "country": "TR",
+    "elev": 952,
+    "faaId": null,
+    "iataId": "ESB",
+    "icaoId": "LTAC",
+    "id": "LTAC",
+    "lat": 40.128,
+    "lon": 32.995,
+    "priority": 1,
+    "site": "Ankara/Esenboğa Intl",
+    "siteType": [
+      "METAR",
+      "TAF"
+    ],
+    "state": "AN",
+    "wmoId": "17128"
+  }
+]

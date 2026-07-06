@@ -41,6 +41,18 @@ npm start
 
 组合页面展示 current cost、mark value、liquidation value、cashout ratio、被动退出 ladder、hedge legs、covered probability、tail risk 和 worst-case PnL。
 
+## 下一步路线图
+
+项目当前已经能获取温度预报、天气模型集合概率和 Polymarket 市场盘口。下一阶段重点是从“能看数据”升级到“能判断机会并复盘判断质量”：
+
+1. 信号评分面板：把模型概率、市场隐含概率、可执行入场成本、fee、预期退出成本、edge、盘口 spread 和深度合成一张交易信号表。
+2. 模型校准与结果复盘：保存当时模型、盘口、最终结算温度和命中桶，用来检查模型系统性偏差。
+3. 仓位与风险约束：限制单市场投入、同城市同日期暴露、tail risk、worst-case PnL 和低流动性盘口。
+4. 自动监控与提醒：当 edge、盘口价格或天气模型更新出现显著变化时提醒，但先不自动下单。
+5. 交易执行闭环：稳定后再增加建议订单、手动确认下单、成交记录和后续自动化。
+
+第一阶段已落到前端“信号评分”面板：`Ensemble Signal` 会输出评分、raw edge、可执行 edge、成本、spread、深度和动作建议。
+
 注意：TCP 端口必须小于等于 `65535`，所以 `88888` 和 `66666` 不能被操作系统监听。这里使用最接近的合法端口 `58888` / `56666`。
 
 端口可通过环境变量覆盖：
@@ -74,6 +86,12 @@ P(bucket) = 命中该温度桶的 ensemble member 数 / ensemble member 总数
 每个 member 会先从 hourly `temperature_2m` 按城市/结算站 timezone 聚合成目标结算日的 high 或 low，再判断落入哪个 Polymarket 温度桶。输出会包含每个桶的 hit count、probability、unmatched count、empirical mean/std、p10/p50/p90，以及前端可画图的桶概率、member rug/scatter、CDF points 和 market implied probability 对比。
 
 Open-Meteo ensemble 客户端走 `https://ensemble-api.open-meteo.com/v1/ensemble`，普通 forecast 仍走 `https://api.open-meteo.com/v1/forecast`。当前先支持 hourly `temperature_2m` 和 `gfs_seamless`、`ecmwf_ifs025`、`ecmwf_aifs025` 等 ensemble model 参数。测试全部使用 mock payload，不访问真实网络。
+
+Web API 的 `/api/forecast`、`/api/ensemble` 和 `/api/ensemble-signal` 默认按 `city` 读取内置城市配置；如果 payload 同时提供 `latitude` 和 `longitude`，则会临时构造一个更具体的点位配置，并可选传 `timezone`、`unit`/`settlementUnit`、`settlementStation`、`stationId`、`forecastGranularity`、`elevation`、`cellSelection`。`cellSelection` 支持 `land`、`sea`、`nearest`。这些字段只影响天气模型请求；Polymarket 盘口发现仍使用 `marketQuery`、`marketSlug`、`conditionId` 或城市关键词。
+
+城市配置也会保存到 SQLite 的 `weather_cities` 表。页面启动时会通过 `GET /api/cities` 初始化并读取城市列表，默认城市会自动写入表中；编辑后通过 `POST /api/cities` 保存。天气模型请求传 `useStoredCity: true` 时，会优先按表里的 `cityId` 读取经纬度、时区、单位、结算站、海拔和格点配置。
+
+结算站坐标可以通过 `POST /api/station-lookup` 辅助解析。接口优先按 4 位 ICAO/METAR 站点 ID 查询 Aviation Weather Center station info；没有站点 ID 或未命中时，按结算站名称查询 Open-Meteo Geocoding，并返回可填入城市配置的经纬度、时区和海拔。
 
 注意：Open-Meteo 返回的是指定模型在指定网格点的预报，不等于 Polymarket 最终结算源。实盘不要把单一模型当成真值；同一城市同一天可能出现 IFS 明显偏冷、AIFS/ICON/Meteo-France 更贴近盘口和常见天气聚合源的情况。前端默认展示多模型确定性预报，ensemble 默认使用 `ecmwf_aifs025`，`Ensemble Signal` 会尝试按城市/日期自动发现 Polymarket 桶并画出盘口隐含概率对比。
 

@@ -7,7 +7,34 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <main class="shell">
+    <div class="app-layout">
+      <aside class="sidebar" aria-label="主菜单">
+        <a class="brand" href="#top">
+          <span class="brand-mark">WQ</span>
+          <span>
+            <strong>天气锁利</strong>
+            <small>Weather Quant</small>
+          </span>
+        </a>
+        <nav class="side-menu">
+          <a class="active" href="#market-panel">盘口配置</a>
+          <a href="/cities.html">城市配置</a>
+          <a href="#forecast-panel">天气模型</a>
+          <a href="#ensemble-panel">Ensemble</a>
+          <a href="#signal-panel">信号评分</a>
+          <a href="#history-panel">历史记录</a>
+          <a href="#weather-market-panel">天气盘口</a>
+          <a href="#portfolio-panel">持仓输入</a>
+          <a href="#risk-panel">风控参数</a>
+          <a href="#summary">组合摘要</a>
+          <a href="#valuation-panel">持仓估值</a>
+          <a href="#exit-panel">退出计划</a>
+          <a href="#hedge-panel">Hedge legs</a>
+          <a href="#scenario-panel">情景矩阵</a>
+        </nav>
+      </aside>
+
+      <main id="top" class="shell">
       <header class="topbar">
         <div>
           <h1>Polymarket 天气组合锁利</h1>
@@ -16,7 +43,7 @@
         <button id="runButton" type="button">评估组合</button>
       </header>
 
-      <section class="panel">
+      <section id="market-panel" class="panel">
         <h2>Polymarket 盘口</h2>
         <div class="market-grid">
           <label>Slug
@@ -27,10 +54,7 @@
           </label>
           <label>城市
             <select id="citySelect">
-              <option value="Munich" data-unit="C">慕尼黑</option>
-              <option value="Moscow" data-unit="C">莫斯科</option>
-              <option value="Ankara" data-unit="C">安卡拉</option>
-              <option value="Las Vegas" data-unit="F">拉斯维加斯</option>
+              <option value="munich" data-unit="C">Munich</option>
             </select>
           </label>
           <label class="wide">关键词覆盖（可选）
@@ -65,12 +89,12 @@
 
       <section id="notice" class="notice" hidden></section>
 
-      <section class="panel">
+      <section id="forecast-panel" class="panel">
         <h2>天气模型</h2>
         <div id="forecast"></div>
       </section>
 
-      <section class="panel">
+      <section id="ensemble-panel" class="panel">
         <h2>Ensemble Probability</h2>
         <div class="market-grid">
           <label>Ensemble
@@ -79,6 +103,9 @@
               <option value="ecmwf_ifs025">ECMWF IFS Ensemble 0.25</option>
               <option value="gfs_seamless">GFS Ensemble Seamless</option>
             </select>
+          </label>
+          <label>最小 Edge
+            <input id="minEdge" type="number" min="0" max="1" step="0.001" value="0.03">
           </label>
           <label class="checkbox-row">
             <input id="saveSqlite" type="checkbox">
@@ -90,7 +117,12 @@
         <div id="ensembleProbability"></div>
       </section>
 
-      <section class="panel">
+      <section id="signal-panel" class="panel">
+        <h2>信号评分</h2>
+        <div id="signalScore"></div>
+      </section>
+
+      <section id="history-panel" class="panel">
         <h2>历史记录</h2>
         <div class="history-grid">
           <div id="recentRuns"></div>
@@ -98,12 +130,12 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section id="weather-market-panel" class="panel">
         <h2>天气盘口</h2>
         <div id="markets"></div>
       </section>
 
-      <section class="panel input-grid">
+      <section id="portfolio-panel" class="panel input-grid">
         <label>
           当前持仓 CSV
           <textarea id="positionsCsv" rows="8"></textarea>
@@ -114,7 +146,7 @@
         </label>
       </section>
 
-      <section class="panel compact-grid">
+      <section id="risk-panel" class="panel compact-grid">
         <label>单位
           <select id="unit">
             <option value="F">F</option>
@@ -130,26 +162,27 @@
 
       <section id="summary" class="metrics"></section>
 
-      <section class="panel">
+      <section id="valuation-panel" class="panel">
         <h2>持仓估值</h2>
         <div id="valuations"></div>
       </section>
 
-      <section class="panel">
+      <section id="exit-panel" class="panel">
         <h2>分批被动退出</h2>
         <div id="exits"></div>
       </section>
 
-      <section class="panel">
+      <section id="hedge-panel" class="panel">
         <h2>Hedge legs</h2>
         <div id="hedgeLegs"></div>
       </section>
 
-      <section class="panel">
+      <section id="scenario-panel" class="panel">
         <h2>组合情景矩阵</h2>
         <div id="scenarios"></div>
       </section>
-    </main>
+      </main>
+    </div>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

@@ -40,6 +40,19 @@ def _unit_from_open_meteo(value: str | None) -> TemperatureUnit:
     return "C"
 
 
+def _open_meteo_location_options(city: CityConfig) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if city.elevation is not None:
+        params["elevation"] = city.elevation
+    if city.cell_selection:
+        params["cell_selection"] = city.cell_selection
+    return params
+
+
+def _open_meteo_temperature_unit(unit: TemperatureUnit) -> str:
+    return "fahrenheit" if unit == "F" else "celsius"
+
+
 class OpenMeteoForecastClient:
     """Open-Meteo daily forecast client.
 
@@ -77,6 +90,8 @@ class OpenMeteoForecastClient:
             "start_date": target_date.isoformat(),
             "end_date": target_date.isoformat(),
             "models": model,
+            "temperature_unit": _open_meteo_temperature_unit(city.settlement_unit),
+            **_open_meteo_location_options(city),
         }
         cache_key = {"provider": "open-meteo", "path": "/v1/forecast", "params": params}
         data = self.cache.get(cache_key, max_age_seconds=self.cache_max_age_seconds)
@@ -176,7 +191,8 @@ class OpenMeteoEnsembleClient:
             "hourly": "temperature_2m",
             "models": model,
             "timezone": city.timezone,
-            "temperature_unit": "fahrenheit" if unit == "F" else "celsius",
+            "temperature_unit": _open_meteo_temperature_unit(unit),
+            **_open_meteo_location_options(city),
         }
         if forecast_days is not None:
             params["forecast_days"] = forecast_days

@@ -331,17 +331,42 @@ def ensemble_signal_rows(
         best_ask = market_best_ask(market_bucket)
         midpoint = market_mark_price(market_bucket)
         executable_entry_cost = best_ask if best_ask is not None else midpoint
-        fee = binary_contract_fee(
-            shares=1.0,
-            price=executable_entry_cost,
-            fee_rate=fee_rate,
+        raw_edge = probability - midpoint if midpoint is not None else None
+        fee = (
+            binary_contract_fee(
+                shares=1.0,
+                price=executable_entry_cost,
+                fee_rate=fee_rate,
+            )
+            if executable_entry_cost is not None
+            else 0.0
         )
         expected_exit_cost = (
             max(0.0, midpoint - best_bid)
             if best_bid is not None and midpoint is not None
             else 0.0
         )
-        edge = probability - executable_entry_cost - fee - expected_exit_cost
+        edge = (
+            probability - executable_entry_cost - fee - expected_exit_cost
+            if executable_entry_cost is not None
+            else -1.0
+        )
+        orderbook = market_bucket.orderbook
+        spread = (
+            max(0.0, best_ask - best_bid)
+            if best_bid is not None and best_ask is not None
+            else None
+        )
+        best_bid_size = orderbook.bids[0].size if orderbook and orderbook.bids else None
+        best_ask_size = orderbook.asks[0].size if orderbook and orderbook.asks else None
+        bid_depth = sum(level.size for level in orderbook.bids[:3]) if orderbook else None
+        ask_depth = sum(level.size for level in orderbook.asks[:3]) if orderbook else None
+        recommendation = _signal_recommendation(
+            edge=edge,
+            raw_edge=raw_edge,
+            min_edge=min_edge,
+            best_ask=best_ask,
+        )
         rows.append(
             {
                 "outcome": market_bucket.outcome,
@@ -350,14 +375,95 @@ def ensemble_signal_rows(
                 "ensembleProbability": probability,
                 "hitCount": probability_item.hit_count if probability_item else 0,
                 "totalMembers": distribution.total_members,
+                "marketImpliedProbability": midpoint,
                 "marketMidpoint": midpoint,
                 "bestBid": best_bid,
                 "bestAsk": best_ask,
+                "spread": spread,
+                "bestBidSize": best_bid_size,
+                "bestAskSize": best_ask_size,
+                "bidDepth": bid_depth,
+                "askDepth": ask_depth,
                 "executableEntryCost": executable_entry_cost,
                 "fee": fee,
                 "expectedExitCost": expected_exit_cost,
+                "rawEdge": raw_edge,
                 "edge": edge,
-                "recommendation": "BUY_YES" if edge >= min_edge else "SKIP_NO_EDGE",
+                "signalScore": _signal_score(
+                    edge=edge,
+                    raw_edge=raw_edge,
+                    spread=spread,
+                    min_edge=min_edge,
+                    ask_depth=ask_depth,
+                ),
+                "recommendation": recommendation,
+                "reason": _signal_reason(
+                    recommendation=recommendation,
+                    edge=edge,
+                    raw_edge=raw_edge,
+                    min_edge=min_edge,
+                    best_ask=best_ask,
+                    spread=spread,
+                ),
             }
         )
     return tuple(rows)
+
+
+def _signal_recommendation(
+    *,
+    edge: float,
+    raw_edge: float | None,
+    min_edge: float,
+    best_ask: float | None,
+) -> str:
+    if best_ask is None:
+        return "SKIP_NO_ASK"
+    if edge >= min_edge:
+        return "BUY_YES"
+    if raw_edge is not None and raw_edge > 0:
+        return "WATCH"
+    return "SKIP_NO_EDGE"
+
+
+def _signal_reason(
+    *,
+    recommendation: str,
+    edge: float,
+    raw_edge: float | None,
+    min_edge: float,
+    best_ask: float | None,
+    spread: float | None,
+) -> str:
+    if recommendation == "SKIP_NO_ASK" or best_ask is None:
+        return "missing executable ask"
+    if recommendation == "BUY_YES":
+        if spread is not None and spread >= 0.08:
+            return "edge clears threshold, but spread is wide"
+        return "executable edge clears threshold"
+    if recommendation == "WATCH":
+        return "model is above market midpoint, but executable edge is below threshold"
+    if raw_edge is not None and raw_edge < -min_edge:
+        return "market price is above model fair probability"
+    return "edge below threshold"
+
+
+def _signal_score(
+    *,
+    edge: float,
+    raw_edge: float | None,
+    spread: float | None,
+    min_edge: float,
+    ask_depth: float | None,
+) -> int:
+    threshold = max(min_edge, 0.01)
+    edge_component = max(-35.0, min(45.0, (edge / threshold) * 25.0))
+    raw_component = 0.0 if raw_edge is None else max(-12.0, min(12.0, raw_edge * 100.0))
+    spread_penalty = 0.0 if spread is None else min(20.0, spread * 200.0)
+    depth_bonus = (
+        0.0
+        if ask_depth is None or ask_depth <= 0
+        else min(8.0, math.log10(ask_depth + 1.0) * 3.0)
+    )
+    score = 50.0 + edge_component + raw_component + depth_bonus - spread_penalty
+    return int(round(max(0.0, min(100.0, score))))

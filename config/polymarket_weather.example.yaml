@@ -32,6 +32,8 @@ cities:
     latitude: 40.7128
     longitude: -74.0060
     timezone: America/New_York
+    elevation: 39
+    cell_selection: nearest
     settlement_station: "Central Park or market-specified station"
     station_id: KNYC
     metar_source: NOAA/METAR

@@ -15,7 +15,7 @@ from weather_quant.ensemble import (
     ensemble_signal_rows,
 )
 from weather_quant.market import GammaMarketClient, MarketDataError
-from weather_quant.models import DEFAULT_TAKER_FEE_RATE, Portfolio, TemperatureKind
+from weather_quant.models import DEFAULT_TAKER_FEE_RATE, CityConfig, Portfolio, TemperatureKind
 from weather_quant.portfolio import (
     calculate_hedge_lock,
     generate_passive_exit_plan,
@@ -33,6 +33,8 @@ from weather_quant.portfolio import (
     value_portfolio,
 )
 from weather_quant.storage import WeatherStorage
+from weather_quant.station_lookup import StationLookupClient
+from weather_quant.units import normalize_unit
 from weather_quant.weather import OpenMeteoEnsembleClient, WeatherEnsembleProvider
 
 
@@ -59,6 +61,18 @@ def _target_date_from_payload(payload: dict[str, Any]) -> date:
         return date.fromisoformat(text)
     except ValueError as exc:
         raise ValueError("targetDate must use YYYY-MM-DD format.") from exc
+
+
+def _date_from_payload_keys(payload: dict[str, Any], *keys: str) -> date | None:
+    for key in keys:
+        text = _optional_text(payload.get(key))
+        if not text:
+            continue
+        try:
+            return date.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"{key} must use YYYY-MM-DD format.") from exc
+    return None
 
 
 def _kind_from_payload(payload: dict[str, Any]) -> TemperatureKind:
@@ -89,6 +103,344 @@ def _model_from_payload(payload: dict[str, Any]) -> str:
 
 def _save_requested(payload: dict[str, Any]) -> bool:
     return _bool_value(payload.get("saveSqlite") or payload.get("save"), default=False)
+
+
+def _payload_raw(payload: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in payload and payload[key] not in (None, ""):
+            return payload[key]
+    return None
+
+
+def _payload_float(payload: dict[str, Any], *keys: str) -> float | None:
+    raw = _payload_raw(payload, *keys)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{keys[0]} must be a number.") from exc
+
+
+def _slug_token(value: str | None) -> str:
+    text = str(value or "custom").strip().lower()
+    chars: list[str] = []
+    for char in text:
+        if "a" <= char <= "z" or "0" <= char <= "9":
+            chars.append(char)
+        elif chars and chars[-1] != "-":
+            chars.append("-")
+    return "".join(chars).strip("-") or "custom"
+
+
+def _coordinate_token(value: float) -> str:
+    return f"{value:.4f}".replace("-", "m").replace(".", "p")
+
+
+def _coordinate_city_id(prefix: str | None, latitude: float, longitude: float) -> str:
+    return (
+        f"{_slug_token(prefix)}-"
+        f"{_coordinate_token(latitude)}-"
+        f"{_coordinate_token(longitude)}"
+    )
+
+
+def _forecast_granularity_from_payload(
+    payload: dict[str, Any],
+    *,
+    default: str = "city",
+) -> str:
+    text = _optional_text(
+        payload.get("forecastGranularity") or payload.get("forecast_granularity")
+    )
+    if not text:
+        return default if default in {"city", "station"} else "city"
+    normalized = text.lower()
+    if normalized not in {"city", "station"}:
+        raise ValueError("forecastGranularity must be city or station.")
+    return normalized
+
+
+def _cell_selection_from_payload(
+    payload: dict[str, Any],
+    *,
+    default: str | None = None,
+) -> str | None:
+    text = _optional_text(payload.get("cellSelection") or payload.get("cell_selection"))
+    if not text:
+        return default
+    normalized = text.lower()
+    if normalized not in {"land", "sea", "nearest"}:
+        raise ValueError("cellSelection must be land, sea, or nearest.")
+    return normalized
+
+
+def _coordinate_payload_present(payload: dict[str, Any]) -> bool:
+    return (
+        _payload_raw(payload, "latitude", "lat") is not None
+        or _payload_raw(payload, "longitude", "lon", "lng") is not None
+    )
+
+
+def _city_storage(payload: dict[str, Any]) -> WeatherStorage:
+    return WeatherStorage(payload.get("dbPath") or None, initialize=True)
+
+
+def _stored_city_requested(payload: dict[str, Any]) -> bool:
+    return _bool_value(
+        payload.get("useStoredCity") or payload.get("use_stored_city"),
+        default=False,
+    )
+
+
+def _city_from_payload(payload: dict[str, Any]) -> CityConfig:
+    city_text = _optional_text(payload.get("city") or payload.get("cityId"))
+    if not _coordinate_payload_present(payload):
+        if not city_text:
+            raise ValueError("Provide city.")
+        if _stored_city_requested(payload):
+            stored_city = _city_storage(payload).get_city(city_text)
+            if stored_city is not None:
+                return stored_city
+            raise KeyError(f"Unknown stored city config: {city_text}")
+        try:
+            return get_city(city_text)
+        except KeyError:
+            stored_city = _city_storage(payload).get_city(city_text)
+            if stored_city is not None:
+                return stored_city
+            raise
+
+    latitude = _payload_float(payload, "latitude", "lat")
+    longitude = _payload_float(payload, "longitude", "lon", "lng")
+    if latitude is None or longitude is None:
+        raise ValueError("Provide both latitude and longitude.")
+    if latitude < -90 or latitude > 90:
+        raise ValueError("latitude must be between -90 and 90.")
+    if longitude < -180 or longitude > 180:
+        raise ValueError("longitude must be between -180 and 180.")
+
+    base_city: CityConfig | None = None
+    if city_text:
+        try:
+            base_city = get_city(city_text)
+        except KeyError:
+            base_city = None
+
+    unit_text = _optional_text(
+        payload.get("settlementUnit")
+        or payload.get("settlement_unit")
+        or payload.get("temperatureUnit")
+        or payload.get("temperature_unit")
+        or payload.get("unit")
+    )
+    settlement_unit = (
+        normalize_unit(unit_text)
+        if unit_text
+        else (base_city.settlement_unit if base_city else "F")
+    )
+    models = _models_from_payload(payload) or (
+        base_city.weather_models
+        if base_city
+        else (
+            "ecmwf_ifs025",
+            "icon_seamless",
+            "meteofrance_seamless",
+            "gfs_seamless",
+            "ukmo_seamless",
+        )
+    )
+    location_id = _optional_text(
+        payload.get("locationId")
+        or payload.get("location_id")
+        or payload.get("customCityId")
+        or payload.get("custom_city_id")
+    )
+    location_name = _optional_text(
+        payload.get("locationName")
+        or payload.get("location")
+        or payload.get("cityName")
+        or payload.get("name")
+        or city_text
+    )
+    elevation = _payload_float(payload, "elevation")
+    model_error_std = _payload_float(payload, "modelErrorStd", "model_error_std")
+    min_distribution_std = _payload_float(
+        payload,
+        "minDistributionStd",
+        "min_distribution_std",
+    )
+
+    return CityConfig(
+        city_id=(
+            location_id
+            or _coordinate_city_id(
+                base_city.city_id if base_city else city_text,
+                latitude,
+                longitude,
+            )
+        ),
+        name=location_name or (base_city.name if base_city else "Custom location"),
+        latitude=latitude,
+        longitude=longitude,
+        timezone=_optional_text(payload.get("timezone") or payload.get("timeZone"))
+        or (base_city.timezone if base_city else "auto"),
+        settlement_station=_optional_text(
+            payload.get("settlementStation") or payload.get("settlement_station")
+        ) or (base_city.settlement_station if base_city else None),
+        station_id=_optional_text(payload.get("stationId") or payload.get("station_id"))
+        or (base_city.station_id if base_city else None),
+        metar_source=_optional_text(payload.get("metarSource") or payload.get("metar_source"))
+        or (base_city.metar_source if base_city else None),
+        forecast_granularity=_forecast_granularity_from_payload(
+            payload,
+            default=base_city.forecast_granularity if base_city else "city",
+        ),  # type: ignore[arg-type]
+        settlement_unit=settlement_unit,
+        weather_models=models,
+        model_weights=base_city.model_weights if base_city else {},
+        model_error_std=(
+            model_error_std
+            if model_error_std is not None
+            else (base_city.model_error_std if base_city else 2.5)
+        ),
+        min_distribution_std=(
+            min_distribution_std
+            if min_distribution_std is not None
+            else (base_city.min_distribution_std if base_city else 1.0)
+        ),
+        elevation=(
+            elevation
+            if elevation is not None
+            else (base_city.elevation if base_city else None)
+        ),
+        cell_selection=_cell_selection_from_payload(
+            payload,
+            default=base_city.cell_selection if base_city else None,
+        ),  # type: ignore[arg-type]
+    )
+
+
+def _city_config_from_editor_payload(payload: dict[str, Any]) -> CityConfig:
+    storage = _city_storage(payload)
+    editing_city_id = _optional_text(
+        payload.get("editingCityId") or payload.get("editing_city_id")
+    )
+    raw_city_id = _optional_text(
+        editing_city_id
+        or payload.get("cityId")
+        or payload.get("city_id")
+        or payload.get("locationId")
+        or payload.get("location_id")
+        or payload.get("city")
+    )
+    existing = storage.get_city(raw_city_id) if raw_city_id else None
+    latitude = _payload_float(payload, "latitude", "lat")
+    longitude = _payload_float(payload, "longitude", "lon", "lng")
+    if latitude is None:
+        latitude = existing.latitude if existing else None
+    if longitude is None:
+        longitude = existing.longitude if existing else None
+    if latitude is None or longitude is None:
+        raise ValueError("Provide both latitude and longitude.")
+    if latitude < -90 or latitude > 90:
+        raise ValueError("latitude must be between -90 and 90.")
+    if longitude < -180 or longitude > 180:
+        raise ValueError("longitude must be between -180 and 180.")
+
+    name = _optional_text(payload.get("name") or payload.get("cityName") or payload.get("locationName"))
+    city_id = _slug_token(raw_city_id or name) if (raw_city_id or name) else _coordinate_city_id(
+        None,
+        latitude,
+        longitude,
+    )
+    unit_text = _optional_text(
+        payload.get("settlementUnit")
+        or payload.get("settlement_unit")
+        or payload.get("unit")
+        or payload.get("temperatureUnit")
+        or payload.get("temperature_unit")
+    )
+    elevation = _payload_float(payload, "elevation")
+    model_error_std = _payload_float(payload, "modelErrorStd", "model_error_std")
+    min_distribution_std = _payload_float(
+        payload,
+        "minDistributionStd",
+        "min_distribution_std",
+    )
+
+    return CityConfig(
+        city_id=city_id,
+        name=name or (existing.name if existing else city_id),
+        latitude=latitude,
+        longitude=longitude,
+        timezone=_optional_text(payload.get("timezone") or payload.get("timeZone"))
+        or (existing.timezone if existing else "auto"),
+        settlement_station=_optional_text(
+            payload.get("settlementStation") or payload.get("settlement_station")
+        ) or (existing.settlement_station if existing else None),
+        station_id=_optional_text(payload.get("stationId") or payload.get("station_id"))
+        or (existing.station_id if existing else None),
+        metar_source=_optional_text(payload.get("metarSource") or payload.get("metar_source"))
+        or (existing.metar_source if existing else None),
+        forecast_granularity=_forecast_granularity_from_payload(
+            payload,
+            default=existing.forecast_granularity if existing else "city",
+        ),  # type: ignore[arg-type]
+        settlement_unit=normalize_unit(
+            unit_text or (existing.settlement_unit if existing else "F")
+        ),
+        weather_models=_models_from_payload(payload)
+        or (existing.weather_models if existing else ("ecmwf_ifs025", "gfs_seamless", "ukmo_seamless")),
+        model_weights=existing.model_weights if existing else {},
+        model_error_std=(
+            model_error_std
+            if model_error_std is not None
+            else (existing.model_error_std if existing else 2.5)
+        ),
+        min_distribution_std=(
+            min_distribution_std
+            if min_distribution_std is not None
+            else (existing.min_distribution_std if existing else 1.0)
+        ),
+        elevation=(
+            elevation
+            if elevation is not None
+            else (existing.elevation if existing else None)
+        ),
+        cell_selection=_cell_selection_from_payload(
+            payload,
+            default=existing.cell_selection if existing else None,
+        ),  # type: ignore[arg-type]
+    )
+
+
+def city_list_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"cities": _city_storage(payload).list_cities()}
+
+
+def city_save_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    storage = _city_storage(payload)
+    city = _city_config_from_editor_payload(payload)
+    saved_city = storage.save_city(city)
+    return {"city": saved_city, "cities": storage.list_cities()}
+
+
+def station_lookup_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    matches = StationLookupClient().lookup(
+        settlement_station=_optional_text(
+            payload.get("settlementStation")
+            or payload.get("settlement_station")
+            or payload.get("query")
+        ),
+        station_id=_optional_text(payload.get("stationId") or payload.get("station_id")),
+        country_code=_optional_text(payload.get("countryCode") or payload.get("country_code")),
+        limit=int(payload.get("limit") or 5),
+    )
+    return {
+        "station": matches[0],
+        "matches": list(matches),
+    }
 
 
 def _market_buckets_for_payload(
@@ -133,15 +485,21 @@ def _optional_market_buckets_for_payload(
 def _selector_from_payload(payload: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     query = _optional_text(payload.get("marketQuery") or payload.get("query"))
     if query is None:
-        city = _optional_text(payload.get("city") or payload.get("cityId"))
-        kind = _optional_text(payload.get("temperatureKind") or payload.get("kind"))
-        if city and kind:
-            query = f"{city} {kind} temperature"
-        elif city:
-            query = f"{city} temperature"
+        query = _selector_city_from_payload(payload)
     slug = _optional_text(payload.get("marketSlug") or payload.get("slug"))
     condition_id = _optional_text(payload.get("conditionId") or payload.get("condition_id"))
     return query, slug, condition_id
+
+
+def _selector_city_from_payload(payload: dict[str, Any]) -> str | None:
+    return _optional_text(
+        payload.get("locationName")
+        or payload.get("cityName")
+        or payload.get("location")
+        or payload.get("name")
+        or payload.get("city")
+        or payload.get("cityId")
+    )
 
 
 def _load_live_market_buckets(payload: dict[str, Any]):
@@ -198,6 +556,19 @@ def _load_live_market_buckets(payload: dict[str, Any]):
     }
 
 
+def _timezone_from_payload(payload: dict[str, Any]) -> str | None:
+    explicit = _optional_text(payload.get("timezone") or payload.get("timeZone"))
+    if explicit:
+        return explicit
+    has_city = _optional_text(payload.get("city") or payload.get("cityId"))
+    if not (has_city or _coordinate_payload_present(payload)):
+        return None
+    try:
+        return _city_from_payload(payload).timezone
+    except (KeyError, ValueError):
+        return None
+
+
 def _level_payload(levels, *, limit: int):  # noqa: ANN001
     return [
         {"price": level.price, "size": level.size}
@@ -218,6 +589,7 @@ def market_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "midpointSum": float(overround["midpoint_sum"]),
             "isOverround": bool(overround["is_overround"]),
             "selector": selector,
+            "timezone": _timezone_from_payload(payload),
         },
         "buckets": [
             {
@@ -252,10 +624,7 @@ def market_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def forecast_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    city_text = _optional_text(payload.get("city") or payload.get("cityId"))
-    if not city_text:
-        raise ValueError("Provide city.")
-    city = get_city(city_text)
+    city = _city_from_payload(payload)
     target_date = _target_date_from_payload(payload)
     kind = _kind_from_payload(payload)
     requested_models = _models_from_payload(payload)
@@ -270,6 +639,11 @@ def forecast_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "summary": {
             "cityId": city.city_id,
             "cityName": city.name,
+            "latitude": city.latitude,
+            "longitude": city.longitude,
+            "timezone": city.timezone,
+            "elevation": city.elevation,
+            "cellSelection": city.cell_selection,
             "targetDate": target_date.isoformat(),
             "kind": kind,
             "unit": city.settlement_unit,
@@ -301,15 +675,14 @@ def forecast_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ensemble_payload(payload: dict[str, Any], *, include_signals: bool) -> dict[str, Any]:
-    city_text = _optional_text(payload.get("city") or payload.get("cityId"))
-    if not city_text:
-        raise ValueError("Provide city.")
-    city = get_city(city_text)
+    city = _city_from_payload(payload)
     target_date = _target_date_from_payload(payload)
     kind = _kind_from_payload(payload)
     model = _model_from_payload(payload)
     forecast_days = payload.get("forecastDays") or payload.get("forecast_days")
     forecast_days_int = int(forecast_days) if forecast_days not in (None, "") else None
+    start_date = _date_from_payload_keys(payload, "startDate", "start_date")
+    end_date = _date_from_payload_keys(payload, "endDate", "end_date")
     client = OpenMeteoEnsembleClient()
     run = client.fetch_run(
         city,
@@ -317,6 +690,8 @@ def _ensemble_payload(payload: dict[str, Any], *, include_signals: bool) -> dict
         kind=kind,
         model=model,
         forecast_days=forecast_days_int,
+        start_date=start_date,
+        end_date=end_date,
     )
     market_buckets = _optional_market_buckets_for_payload(
         payload,
@@ -353,6 +728,11 @@ def _ensemble_payload(payload: dict[str, Any], *, include_signals: bool) -> dict
             "model": run.model,
             "cityId": city.city_id,
             "cityName": city.name,
+            "latitude": city.latitude,
+            "longitude": city.longitude,
+            "timezone": city.timezone,
+            "elevation": city.elevation,
+            "cellSelection": city.cell_selection,
             "targetDate": target_date.isoformat(),
             "kind": kind,
             "unit": distribution.unit,
@@ -535,6 +915,9 @@ def portfolio_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     handlers = {
+        "cities": city_list_payload,
+        "city-save": city_save_payload,
+        "station-lookup": station_lookup_payload,
         "portfolio": portfolio_payload,
         "markets": market_payload,
         "forecast": forecast_payload,

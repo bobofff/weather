@@ -1,0 +1,25 @@
+{
+  "daily": {
+    "temperature_2m_max": [
+      27.4
+    ],
+    "temperature_2m_min": [
+      18.5
+    ],
+    "time": [
+      "2026-07-06"
+    ]
+  },
+  "daily_units": {
+    "temperature_2m_max": "°C",
+    "temperature_2m_min": "°C",
+    "time": "iso8601"
+  },
+  "elevation": 883.0,
+  "generationtime_ms": 0.034809112548828125,
+  "latitude": 39.9,
+  "longitude": 32.9,
+  "timezone": "Europe/Istanbul",
+  "timezone_abbreviation": "GMT+3",
+  "utc_offset_seconds": 10800
+}
