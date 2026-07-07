@@ -232,6 +232,50 @@ class WebApiPortfolioPayloadTest(unittest.TestCase):
         self.assertEqual(FakeWeatherEnsembleProvider.kwargs["kind"], "high")
         self.assertEqual(FakeWeatherEnsembleProvider.kwargs["models"], ("ecmwf_ifs025",))
 
+    def test_forecast_payload_returns_provider_warnings(self) -> None:
+        class FakeWeatherEnsembleProvider:
+            def fetch_ensemble(self, city, **kwargs):  # noqa: ANN003
+                target_date = kwargs["target_date"]
+                kind = kwargs["kind"]
+                return EnsembleForecast(
+                    city=city,
+                    target_date=target_date,
+                    kind=kind,
+                    provider_warnings=("ecmwf_ifs025: temporary upstream failure",),
+                    points=(
+                        ForecastPoint(
+                            city_id=city.city_id,
+                            target_date=target_date,
+                            kind=kind,
+                            value=22.0,
+                            unit=city.settlement_unit,
+                            source_model="icon_seamless",
+                            raw_payload={"provider": "open-meteo"},
+                        ),
+                    ),
+                )
+
+        original_provider = web_api.WeatherEnsembleProvider
+        web_api.WeatherEnsembleProvider = FakeWeatherEnsembleProvider  # type: ignore[assignment]
+        try:
+            result = web_api.forecast_payload(
+                {
+                    "city": "Munich",
+                    "targetDate": "2026-07-03",
+                    "temperatureKind": "high",
+                    "models": ["ecmwf_ifs025", "icon_seamless"],
+                }
+            )
+        finally:
+            web_api.WeatherEnsembleProvider = original_provider
+
+        self.assertEqual(result["summary"]["modelCount"], 1)
+        self.assertEqual(result["summary"]["failedModelCount"], 1)
+        self.assertEqual(
+            result["summary"]["warnings"],
+            ["ecmwf_ifs025: temporary upstream failure"],
+        )
+
     def test_forecast_payload_accepts_custom_coordinates(self) -> None:
         class FakeWeatherEnsembleProvider:
             kwargs = None

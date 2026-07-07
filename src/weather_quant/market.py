@@ -10,13 +10,14 @@ from typing import Any
 
 from weather_quant.buckets import BucketParseError, parse_temperature_bucket
 from weather_quant.cache import FileCache
-from weather_quant.http import JsonHttpClient
+from weather_quant.http import HttpClientError, JsonHttpClient
 from weather_quant.models import (
     MarketBucket,
     OrderBookLevel,
     OrderBookSnapshot,
     TemperatureUnit,
 )
+from weather_quant.runtime_logs import log_external_api_failure
 
 
 class MarketDataError(RuntimeError):
@@ -96,7 +97,17 @@ class GammaMarketClient:
         cache_key = {"provider": "polymarket-gamma", "path": "/markets", "params": params}
         data = self.cache.get(cache_key, max_age_seconds=self.cache_max_age_seconds)
         if data is None:
-            data = self.http.get_json("/markets", params=params)
+            try:
+                data = self.http.get_json("/markets", params=params)
+            except HttpClientError as exc:
+                log_external_api_failure(
+                    provider="polymarket-gamma",
+                    action="search_markets",
+                    endpoint="/markets",
+                    details={"params": params},
+                    error=exc,
+                )
+                raise MarketDataError(str(exc)) from exc
             self.cache.set(cache_key, data)
         if not isinstance(data, list):
             raise MarketDataError("Gamma /markets response is not a list.")
@@ -127,7 +138,17 @@ class GammaMarketClient:
         cache_key = {"provider": "polymarket-gamma", "path": "/events/keyset", "params": params}
         data = self.cache.get(cache_key, max_age_seconds=self.cache_max_age_seconds)
         if data is None:
-            data = self.http.get_json("/events/keyset", params=params)
+            try:
+                data = self.http.get_json("/events/keyset", params=params)
+            except HttpClientError as exc:
+                log_external_api_failure(
+                    provider="polymarket-gamma",
+                    action="list_events_keyset",
+                    endpoint="/events/keyset",
+                    details={"params": params},
+                    error=exc,
+                )
+                raise MarketDataError(str(exc)) from exc
             self.cache.set(cache_key, data)
         if not isinstance(data, Mapping):
             raise MarketDataError("Gamma /events/keyset response is not a mapping.")
@@ -274,7 +295,11 @@ class GammaMarketClient:
             if not bucket.token_id:
                 yield bucket
                 continue
-            midpoint = self.get_midpoint(bucket.token_id)
+            try:
+                midpoint = self.get_midpoint(bucket.token_id)
+            except MarketDataError:
+                yield bucket
+                continue
             if midpoint is None:
                 yield bucket
                 continue
@@ -294,7 +319,17 @@ class GammaMarketClient:
         cache_key = {"provider": "polymarket-clob", "path": "/midpoint", "token_id": token_id}
         data = self.cache.get(cache_key, max_age_seconds=self.cache_max_age_seconds)
         if data is None:
-            data = self.clob_http.get_json("/midpoint", params={"token_id": token_id})
+            try:
+                data = self.clob_http.get_json("/midpoint", params={"token_id": token_id})
+            except HttpClientError as exc:
+                log_external_api_failure(
+                    provider="polymarket-clob",
+                    action="get_midpoint",
+                    endpoint="/midpoint",
+                    details={"token_id": token_id},
+                    error=exc,
+                )
+                raise MarketDataError(str(exc)) from exc
             self.cache.set(cache_key, data)
         if isinstance(data, Mapping):
             return _safe_float(data.get("mid") or data.get("midpoint"))
@@ -328,7 +363,17 @@ class GammaMarketClient:
         cache_key = {"provider": "polymarket-clob", "path": "/book", "token_id": token_id}
         data = self.cache.get(cache_key, max_age_seconds=self.cache_max_age_seconds)
         if data is None:
-            data = self.clob_http.get_json("/book", params={"token_id": token_id})
+            try:
+                data = self.clob_http.get_json("/book", params={"token_id": token_id})
+            except HttpClientError as exc:
+                log_external_api_failure(
+                    provider="polymarket-clob",
+                    action="get_orderbook",
+                    endpoint="/book",
+                    details={"token_id": token_id},
+                    error=exc,
+                )
+                raise MarketDataError(str(exc)) from exc
             self.cache.set(cache_key, data)
         if not isinstance(data, Mapping):
             raise MarketDataError("CLOB /book response is not a mapping.")

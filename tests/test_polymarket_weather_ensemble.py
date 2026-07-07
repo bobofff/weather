@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
+from weather_quant import runtime_logs
 from weather_quant.cache import FileCache
 from weather_quant.config import load_trading_config
 from weather_quant.db import init_database
@@ -25,7 +28,11 @@ from weather_quant.models import (
     TemperatureBucket,
 )
 from weather_quant.storage import WeatherStorage
-from weather_quant.weather import OpenMeteoEnsembleClient, OpenMeteoForecastClient
+from weather_quant.weather import (
+    OpenMeteoEnsembleClient,
+    OpenMeteoForecastClient,
+    WeatherEnsembleProvider,
+)
 
 
 def city() -> CityConfig:
@@ -377,6 +384,60 @@ class EnsembleProbabilityTest(unittest.TestCase):
         self.assertEqual(fake_http.params["elevation"], 453.0)
         self.assertEqual(fake_http.params["cell_selection"], "nearest")
         self.assertEqual(fake_http.params["temperature_unit"], "celsius")
+
+    def test_weather_provider_keeps_successful_models_when_one_open_meteo_model_fails(self) -> None:
+        class FakeForecastHttp:
+            def get_json(self, path, *, params=None, headers=None):  # noqa: ANN001, ANN003
+                if params and params.get("models") == "bad_model":
+                    raise RuntimeError("temporary upstream failure")
+                return {
+                    "daily_units": {"temperature_2m_max": "°C"},
+                    "daily": {
+                        "time": ["2026-07-05"],
+                        "temperature_2m_max": [24.0],
+                        "temperature_2m_min": [18.0],
+                    },
+                }
+
+        custom_city = CityConfig(
+            city_id="custom",
+            name="Custom",
+            latitude=48.3538,
+            longitude=11.7861,
+            timezone="Europe/Berlin",
+            settlement_unit="C",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as logdir:
+            open_meteo = OpenMeteoForecastClient(
+                http_client=FakeForecastHttp(),  # type: ignore[arg-type]
+                cache=FileCache(Path(tmpdir) / "cache"),
+            )
+            provider = WeatherEnsembleProvider(open_meteo=open_meteo)
+            with mock.patch.object(runtime_logs, "LOG_DIR", Path(logdir)):
+                ensemble = provider.fetch_ensemble(
+                    custom_city,
+                    target_date=date(2026, 7, 5),
+                    kind="high",
+                    models=("bad_model", "icon_seamless"),
+                )
+            log_entries = [
+                json.loads(line)
+                for path in Path(logdir).glob("*.log")
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual([point.source_model for point in ensemble.points], ["icon_seamless"])
+        self.assertEqual(len(ensemble.provider_warnings), 1)
+        self.assertIn("bad_model", ensemble.provider_warnings[0])
+        self.assertTrue(
+            any(
+                entry["source"] == "external_api"
+                and entry["details"]["provider"] == "open-meteo"
+                and entry["details"]["model"] == "bad_model"
+                for entry in log_entries
+            )
+        )
 
     def test_open_meteo_ensemble_client_forwards_location_options(self) -> None:
         class FakeEnsembleHttp:

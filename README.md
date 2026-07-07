@@ -41,6 +41,14 @@ npm start
 
 组合页面展示 current cost、mark value、liquidation value、cashout ratio、被动退出 ladder、hedge legs、covered probability、tail risk 和 worst-case PnL。
 
+AI 解读面板通过 `POST /api/llm-summary` 调用 OpenAI Responses API，只解释本地已经算好的 `Ensemble Signal` 或组合评估结果，不参与概率、edge、hedge、PnL 等核心计算。启用前需要配置：
+
+```bash
+cp .env.example .env
+```
+
+然后在 `.env` 里填写 `OPENAI_API_KEY`。服务启动时会自动加载 `.env`，也支持 `export OPENAI_API_KEY="sk-..."` 这种写法。修改 `.env` 后需要重启 `npm start` 进程。
+
 ## 下一步路线图
 
 项目当前已经能获取温度预报、天气模型集合概率和 Polymarket 市场盘口。下一阶段重点是从“能看数据”升级到“能判断机会并复盘判断质量”：

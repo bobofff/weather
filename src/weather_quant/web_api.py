@@ -14,8 +14,21 @@ from weather_quant.ensemble import (
     ensemble_chart_data,
     ensemble_signal_rows,
 )
+from weather_quant.llm import OpenAILlmSummaryClient
 from weather_quant.market import GammaMarketClient, MarketDataError
-from weather_quant.models import DEFAULT_TAKER_FEE_RATE, CityConfig, Portfolio, TemperatureKind
+from weather_quant.models import DEFAULT_TAKER_FEE_RATE, CityConfig, MarketBucket, Portfolio, TemperatureKind
+from weather_quant.paper_trading import (
+    DEFAULT_ACCOUNT_KEY,
+    DEFAULT_INITIAL_CASH,
+    DEFAULT_MAX_CITY_DATE_EXPOSURE,
+    DEFAULT_MAX_MARKET_EXPOSURE,
+    DEFAULT_MAX_SPREAD,
+    DEFAULT_MIN_ASK_DEPTH_SHARES,
+    DEFAULT_MIN_EDGE,
+    DEFAULT_STAKE_USDC,
+    bucket_from_key,
+    market_buckets_from_payload,
+)
 from weather_quant.portfolio import (
     calculate_hedge_lock,
     generate_passive_exit_plan,
@@ -33,6 +46,7 @@ from weather_quant.portfolio import (
     value_portfolio,
 )
 from weather_quant.storage import WeatherStorage
+from weather_quant.settlement import SettlementImporter
 from weather_quant.station_lookup import StationLookupClient
 from weather_quant.units import normalize_unit
 from weather_quant.weather import OpenMeteoEnsembleClient, WeatherEnsembleProvider
@@ -576,6 +590,37 @@ def _level_payload(levels, *, limit: int):  # noqa: ANN001
     ]
 
 
+def _market_bucket_payload(bucket, *, depth_limit: int = 10):  # noqa: ANN001
+    return {
+        "outcome": bucket.outcome,
+        "question": bucket.question,
+        "marketId": bucket.market_id,
+        "slug": bucket.slug,
+        "conditionId": bucket.condition_id,
+        "tokenId": bucket.token_id,
+        "price": bucket.price,
+        "markPrice": market_mark_price(bucket),
+        "bestBid": market_best_bid(bucket),
+        "bestAsk": market_best_ask(bucket),
+        "midpoint": bucket.orderbook.midpoint if bucket.orderbook else None,
+        "spread": bucket.orderbook.spread if bucket.orderbook else None,
+        "bucket": {
+            "label": bucket.bucket.label,
+            "lower": bucket.bucket.lower,
+            "upper": bucket.bucket.upper,
+            "unit": bucket.bucket.unit,
+            "lowerInclusive": bucket.bucket.lower_inclusive,
+            "upperInclusive": bucket.bucket.upper_inclusive,
+        },
+        "bucketLabel": bucket.bucket.label,
+        "bucketKey": bucket.bucket.canonical_key,
+        "orderbook": {
+            "bids": _level_payload(bucket.orderbook.bids, limit=depth_limit),
+            "asks": _level_payload(bucket.orderbook.asks, limit=depth_limit),
+        } if bucket.orderbook else None,
+    }
+
+
 def market_payload(payload: dict[str, Any]) -> dict[str, Any]:
     buckets, selector = _load_live_market_buckets(payload)
     depth_limit = int(payload.get("depthLimit") or 10)
@@ -591,35 +636,7 @@ def market_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "selector": selector,
             "timezone": _timezone_from_payload(payload),
         },
-        "buckets": [
-            {
-                "outcome": bucket.outcome,
-                "question": bucket.question,
-                "marketId": bucket.market_id,
-                "slug": bucket.slug,
-                "conditionId": bucket.condition_id,
-                "tokenId": bucket.token_id,
-                "price": bucket.price,
-                "markPrice": market_mark_price(bucket),
-                "bestBid": market_best_bid(bucket),
-                "bestAsk": market_best_ask(bucket),
-                "midpoint": bucket.orderbook.midpoint if bucket.orderbook else None,
-                "spread": bucket.orderbook.spread if bucket.orderbook else None,
-                "bucket": {
-                    "label": bucket.bucket.label,
-                    "lower": bucket.bucket.lower,
-                    "upper": bucket.bucket.upper,
-                    "unit": bucket.bucket.unit,
-                    "lowerInclusive": bucket.bucket.lower_inclusive,
-                    "upperInclusive": bucket.bucket.upper_inclusive,
-                },
-                "orderbook": {
-                    "bids": _level_payload(bucket.orderbook.bids, limit=depth_limit),
-                    "asks": _level_payload(bucket.orderbook.asks, limit=depth_limit),
-                } if bucket.orderbook else None,
-            }
-            for bucket in buckets
-        ],
+        "buckets": [_market_bucket_payload(bucket, depth_limit=depth_limit) for bucket in buckets],
     }
 
 
@@ -649,6 +666,8 @@ def forecast_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "unit": city.settlement_unit,
             "modelCount": len(ensemble.points),
             "models": list(ensemble.source_models),
+            "warnings": list(ensemble.provider_warnings),
+            "failedModelCount": len(ensemble.provider_warnings),
             "mean": sum(values) / len(values),
             "min": min(values),
             "max": max(values),
@@ -773,6 +792,10 @@ def _ensemble_payload(payload: dict[str, Any], *, include_signals: bool) -> dict
         ],
         "chart": ensemble_chart_data(distribution, market_buckets=market_buckets),
         "signals": list(signals),
+        "marketBuckets": [
+            _market_bucket_payload(bucket, depth_limit=int(payload.get("depthLimit") or 10))
+            for bucket in market_buckets
+        ],
     }
 
 
@@ -792,6 +815,161 @@ def db_runs_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def db_probabilities_payload(payload: dict[str, Any]) -> dict[str, Any]:
     storage = WeatherStorage(payload.get("dbPath") or None)
     return {"probabilities": storage.recent_probabilities(limit=int(payload.get("limit") or 50))}
+
+
+def _settlement_buckets_for_payload(
+    payload: dict[str, Any],
+    *,
+    city: CityConfig,
+) -> tuple[tuple, str | None]:
+    if not _bool_value(payload.get("includeMarketBuckets"), default=True):
+        return (), None
+    try:
+        market_buckets = _optional_market_buckets_for_payload(
+            payload,
+            unit=city.settlement_unit,
+            allow_city_selector=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (), str(exc)
+    return market_buckets, None
+
+
+def settlement_import_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    city = _city_from_payload(payload)
+    target_date = _target_date_from_payload(payload)
+    kind = _kind_from_payload(payload)
+    storage = WeatherStorage(payload.get("dbPath") or None, initialize=True)
+    market_buckets, bucket_warning = _settlement_buckets_for_payload(payload, city=city)
+    request_payload = {
+        "cityId": city.city_id,
+        "targetDate": target_date.isoformat(),
+        "kind": kind,
+        "stationId": city.station_id,
+        "metarSource": city.metar_source,
+        "marketBucketCount": len(market_buckets),
+    }
+    try:
+        observation = SettlementImporter().import_observation(
+            city,
+            target_date=target_date,
+            kind=kind,
+            buckets=tuple(bucket.bucket for bucket in market_buckets),
+        )
+    except Exception as exc:  # noqa: BLE001
+        import_run_key = storage.save_settlement_import_run(
+            city=city,
+            target_date=target_date.isoformat(),
+            kind=kind,
+            provider="settlement-interface",
+            station_id=city.station_id,
+            status="failed",
+            error_message=str(exc),
+            raw_request=request_payload,
+        )
+        return {
+            "summary": {
+                "status": "failed",
+                "importRunKey": import_run_key,
+                "cityId": city.city_id,
+                "cityName": city.name,
+                "targetDate": target_date.isoformat(),
+                "kind": kind,
+                "stationId": city.station_id,
+                "errorMessage": str(exc),
+            },
+            "settlement": None,
+            "outcomes": [],
+        }
+
+    import_run_key = storage.save_settlement_import_run(
+        city=city,
+        target_date=target_date.isoformat(),
+        kind=kind,
+        provider=observation.source_provider,
+        station_id=observation.station_id,
+        status="success",
+        raw_request=request_payload,
+        raw_payload=observation.raw_payload,
+    )
+    settlement_key = storage.save_settlement(
+        observation,
+        import_run_key=import_run_key,
+    )
+    outcomes = storage.reconcile_signal_outcomes(
+        city_id=city.city_id,
+        target_date=target_date.isoformat(),
+        kind=kind,
+    )
+    return {
+        "summary": {
+            "status": "success",
+            "importRunKey": import_run_key,
+            "settlementKey": settlement_key,
+            "cityId": city.city_id,
+            "cityName": city.name,
+            "targetDate": target_date.isoformat(),
+            "kind": kind,
+            "stationId": observation.station_id,
+            "bucketWarning": bucket_warning,
+            "outcomeCount": len(outcomes),
+        },
+        "settlement": {
+            "settlementKey": settlement_key,
+            "cityId": city.city_id,
+            "cityName": city.name,
+            "targetDate": target_date.isoformat(),
+            "kind": kind,
+            "stationId": observation.station_id,
+            "settlementStation": observation.settlement_station,
+            "sourceProvider": observation.source_provider,
+            "sourceUrl": observation.source_url,
+            "observedValue": observation.observed_value,
+            "unit": observation.unit,
+            "bucketLabel": observation.bucket_label,
+            "bucketKey": observation.bucket_key,
+            "observationCount": observation.observation_count,
+            "observationStart": (
+                observation.observation_start.isoformat()
+                if observation.observation_start
+                else None
+            ),
+            "observationEnd": (
+                observation.observation_end.isoformat()
+                if observation.observation_end
+                else None
+            ),
+        },
+        "outcomes": outcomes,
+    }
+
+
+def settlement_reconcile_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    storage = WeatherStorage(payload.get("dbPath") or None, initialize=True)
+    city_id = _optional_text(payload.get("city") or payload.get("cityId"))
+    target_date = _optional_text(payload.get("targetDate") or payload.get("date"))
+    kind = _optional_text(payload.get("temperatureKind") or payload.get("kind"))
+    outcomes = storage.reconcile_signal_outcomes(
+        city_id=city_id,
+        target_date=target_date,
+        kind=kind,
+    )
+    return {"summary": {"outcomeCount": len(outcomes)}, "outcomes": outcomes}
+
+
+def settlements_recent_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    storage = WeatherStorage(payload.get("dbPath") or None)
+    return {"settlements": storage.recent_settlements(limit=int(payload.get("limit") or 20))}
+
+
+def signal_outcomes_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    storage = WeatherStorage(payload.get("dbPath") or None)
+    return {"outcomes": storage.recent_signal_outcomes(limit=int(payload.get("limit") or 50))}
+
+
+def calibration_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    storage = WeatherStorage(payload.get("dbPath") or None)
+    return storage.calibration_summary()
 
 
 def portfolio_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -912,6 +1090,347 @@ def portfolio_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _paper_account_key(payload: dict[str, Any]) -> str:
+    return _optional_text(payload.get("accountKey") or payload.get("account_key")) or DEFAULT_ACCOUNT_KEY
+
+
+def _paper_initial_cash(payload: dict[str, Any]) -> float:
+    raw = _payload_raw(payload, "initialCash", "initial_cash")
+    return float(DEFAULT_INITIAL_CASH if raw is None else raw)
+
+
+def _paper_stake(payload: dict[str, Any]) -> float:
+    raw = _payload_raw(payload, "stakeUsdc", "stake")
+    return float(DEFAULT_STAKE_USDC if raw is None else raw)
+
+
+def _paper_number(payload: dict[str, Any], default: float, *keys: str) -> float:
+    raw = _payload_raw(payload, *keys)
+    return float(default if raw is None else raw)
+
+
+def _paper_city_optional(payload: dict[str, Any]) -> CityConfig | None:
+    if not (
+        _optional_text(payload.get("city") or payload.get("cityId"))
+        or _coordinate_payload_present(payload)
+    ):
+        return None
+    return _city_from_payload(payload)
+
+
+def _paper_context_from_payload(
+    payload: dict[str, Any],
+    *,
+    city: CityConfig | None,
+) -> dict[str, Any]:
+    raw_context = payload.get("context")
+    context = dict(raw_context) if isinstance(raw_context, dict) else {}
+    summary = payload.get("summary")
+    summary_payload = summary if isinstance(summary, dict) else {}
+    target_date = _optional_text(
+        payload.get("targetDate")
+        or payload.get("date")
+        or context.get("targetDate")
+        or summary_payload.get("targetDate")
+    )
+    kind = _optional_text(
+        payload.get("temperatureKind")
+        or payload.get("kind")
+        or context.get("kind")
+        or summary_payload.get("kind")
+    )
+    if city is not None:
+        context.update(
+            {
+                "cityId": city.city_id,
+                "cityName": city.name,
+                "targetDate": target_date,
+                "kind": kind,
+                "settlementStation": city.settlement_station,
+                "stationId": city.station_id,
+                "metarSource": city.metar_source,
+                "runKey": summary_payload.get("runKey"),
+                "marketSnapshotGroup": summary_payload.get("marketSnapshotGroup"),
+            }
+        )
+    else:
+        context.setdefault("targetDate", target_date)
+        context.setdefault("kind", kind)
+        if summary_payload.get("cityId"):
+            context.setdefault("cityId", summary_payload.get("cityId"))
+        if summary_payload.get("cityName"):
+            context.setdefault("cityName", summary_payload.get("cityName"))
+        if summary_payload.get("settlementStation"):
+            context.setdefault("settlementStation", summary_payload.get("settlementStation"))
+        if summary_payload.get("stationId"):
+            context.setdefault("stationId", summary_payload.get("stationId"))
+        if summary_payload.get("marketSnapshotGroup"):
+            context.setdefault("marketSnapshotGroup", summary_payload.get("marketSnapshotGroup"))
+        if summary_payload.get("runKey"):
+            context.setdefault("runKey", summary_payload.get("runKey"))
+    return context
+
+
+def _paper_signal_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_signal = payload.get("signal")
+    if isinstance(raw_signal, dict):
+        return raw_signal
+    signals = payload.get("signals")
+    if isinstance(signals, list):
+        buy_signals = [
+            signal
+            for signal in signals
+            if isinstance(signal, dict) and signal.get("recommendation") == "BUY_YES"
+        ]
+        if buy_signals:
+            return max(
+                buy_signals,
+                key=lambda signal: float(signal.get("edge") or -99.0),
+            )
+    raise ValueError("Provide signal or signals with a BUY_YES row.")
+
+
+def _paper_signals_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    signals = payload.get("signals")
+    if isinstance(signals, list):
+        return [signal for signal in signals if isinstance(signal, dict)]
+    return [_paper_signal_from_payload(payload)]
+
+
+def _paper_market_buckets_from_payload(
+    payload: dict[str, Any],
+    *,
+    city: CityConfig | None,
+) -> tuple:
+    unit = city.settlement_unit if city is not None else str(payload.get("unit") or "F")
+    raw_market_buckets = payload.get("marketBuckets") or payload.get("markets")
+    if isinstance(raw_market_buckets, list):
+        rows = [row for row in raw_market_buckets if isinstance(row, dict)]
+        return market_buckets_from_payload(rows, default_unit=unit)
+    if str(payload.get("marketsCsv") or "").strip():
+        return parse_inline_market_buckets(str(payload.get("marketsCsv")), default_unit=unit)  # type: ignore[arg-type]
+    has_selector = (
+        _optional_text(payload.get("marketQuery") or payload.get("query"))
+        or _optional_text(payload.get("marketSlug") or payload.get("slug"))
+        or _optional_text(payload.get("conditionId") or payload.get("condition_id"))
+        or _optional_text(payload.get("city") or payload.get("cityId"))
+    )
+    if has_selector:
+        return _optional_market_buckets_for_payload(
+            payload,
+            unit=unit,
+            allow_city_selector=True,
+        )
+    return ()
+
+
+def _paper_storage(payload: dict[str, Any]) -> WeatherStorage:
+    return WeatherStorage(payload.get("dbPath") or None, initialize=True)
+
+
+def paper_preview_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    city = _paper_city_optional(payload)
+    context = _paper_context_from_payload(payload, city=city)
+    market_buckets = _paper_market_buckets_from_payload(payload, city=city)
+    storage = _paper_storage(payload)
+    account_key = _paper_account_key(payload)
+    preview = storage.paper_buy_preview(
+        signal=_paper_signal_from_payload(payload),
+        market_buckets=market_buckets,
+        context=context,
+        account_key=account_key,
+        initial_cash=_paper_initial_cash(payload),
+        stake_usdc=_paper_stake(payload),
+        min_edge=_paper_number(payload, DEFAULT_MIN_EDGE, "minEdge"),
+        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+        max_spread=_paper_number(payload, DEFAULT_MAX_SPREAD, "maxSpread"),
+        min_ask_depth_shares=_paper_number(payload, DEFAULT_MIN_ASK_DEPTH_SHARES, "minAskDepthShares"),
+        max_market_exposure=_paper_number(payload, DEFAULT_MAX_MARKET_EXPOSURE, "maxMarketExposure"),
+        max_city_date_exposure=_paper_number(payload, DEFAULT_MAX_CITY_DATE_EXPOSURE, "maxCityDateExposure"),
+    )
+    return {
+        "preview": preview,
+        "portfolio": storage.paper_portfolio(
+            account_key=account_key,
+            initial_cash=_paper_initial_cash(payload),
+            market_buckets=market_buckets,
+            fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+        ),
+    }
+
+
+def paper_buy_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    city = _paper_city_optional(payload)
+    context = _paper_context_from_payload(payload, city=city)
+    market_buckets = _paper_market_buckets_from_payload(payload, city=city)
+    storage = _paper_storage(payload)
+    account_key = _paper_account_key(payload)
+    result = storage.execute_paper_buy(
+        signal=_paper_signal_from_payload(payload),
+        market_buckets=market_buckets,
+        context=context,
+        account_key=account_key,
+        initial_cash=_paper_initial_cash(payload),
+        stake_usdc=_paper_stake(payload),
+        min_edge=_paper_number(payload, DEFAULT_MIN_EDGE, "minEdge"),
+        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+        max_spread=_paper_number(payload, DEFAULT_MAX_SPREAD, "maxSpread"),
+        min_ask_depth_shares=_paper_number(payload, DEFAULT_MIN_ASK_DEPTH_SHARES, "minAskDepthShares"),
+        max_market_exposure=_paper_number(payload, DEFAULT_MAX_MARKET_EXPOSURE, "maxMarketExposure"),
+        max_city_date_exposure=_paper_number(payload, DEFAULT_MAX_CITY_DATE_EXPOSURE, "maxCityDateExposure"),
+    )
+    result["portfolio"] = storage.paper_portfolio(
+        account_key=account_key,
+        initial_cash=_paper_initial_cash(payload),
+        market_buckets=market_buckets,
+        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+    )
+    return result
+
+
+def paper_portfolio_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    city = _paper_city_optional(payload)
+    market_buckets = _paper_market_buckets_from_payload(payload, city=city)
+    return _paper_storage(payload).paper_portfolio(
+        account_key=_paper_account_key(payload),
+        initial_cash=_paper_initial_cash(payload),
+        market_buckets=market_buckets,
+        limit=int(payload.get("limit") or 20),
+        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+    )
+
+
+def _paper_live_position_market_buckets(
+    payload: dict[str, Any],
+    *,
+    storage: WeatherStorage,
+    city: CityConfig | None,
+) -> tuple[MarketBucket, ...]:
+    provided = _paper_market_buckets_from_payload(payload, city=city)
+    if provided:
+        return provided
+    account_key = _paper_account_key(payload)
+    positions = storage.open_paper_positions(account_key=account_key)
+    if not positions:
+        return ()
+    client = GammaMarketClient(
+        cache_max_age_seconds=int(_paper_number(payload, 5.0, "markCacheSeconds")),
+    )
+    buckets: list[MarketBucket] = []
+    for position in positions:
+        token_id = _optional_text(position.get("token_id"))
+        if not token_id:
+            continue
+        try:
+            orderbook = client.get_orderbook(token_id)
+        except MarketDataError:
+            continue
+        bucket = bucket_from_key(
+            bucket_label=str(position.get("bucket_label") or position.get("outcome") or ""),
+            bucket_key=_optional_text(position.get("bucket_key")),
+            default_unit=city.settlement_unit if city is not None else str(payload.get("unit") or "F"),
+        )
+        buckets.append(
+            MarketBucket(
+                market_id=str(position.get("condition_id") or "paper-position"),
+                question="Paper position live orderbook",
+                slug=_optional_text(position.get("market_slug")),
+                condition_id=_optional_text(position.get("condition_id")),
+                outcome=str(position.get("outcome") or bucket.label),
+                price=orderbook.midpoint or 0.0,
+                bucket=bucket,
+                token_id=token_id,
+                orderbook=orderbook,
+                raw_payload=dict(position),
+            )
+        )
+    return tuple(buckets)
+
+
+def paper_mark_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    city = _paper_city_optional(payload)
+    storage = _paper_storage(payload)
+    account_key = _paper_account_key(payload)
+    market_buckets = _paper_live_position_market_buckets(
+        payload,
+        storage=storage,
+        city=city,
+    )
+    result = storage.paper_mark_positions(
+        account_key=account_key,
+        initial_cash=_paper_initial_cash(payload),
+        market_buckets=market_buckets,
+        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+        target_profit=_paper_number(payload, 0.10, "targetProfit"),
+        min_cashout_ratio=_paper_number(payload, 0.50, "minCashoutRatio"),
+    )
+    result["portfolio"] = storage.paper_portfolio(
+        account_key=account_key,
+        initial_cash=_paper_initial_cash(payload),
+        market_buckets=market_buckets,
+        limit=int(payload.get("limit") or 20),
+        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+    )
+    return result
+
+
+def paper_reconcile_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    storage = _paper_storage(payload)
+    result = storage.reconcile_paper_positions(
+        account_key=_paper_account_key(payload),
+        city_id=_optional_text(payload.get("city") or payload.get("cityId")),
+        target_date=_optional_text(payload.get("targetDate") or payload.get("date")),
+        kind=_optional_text(payload.get("temperatureKind") or payload.get("kind")),
+    )
+    result["portfolio"] = storage.paper_portfolio(
+        account_key=_paper_account_key(payload),
+        initial_cash=_paper_initial_cash(payload),
+    )
+    return result
+
+
+def paper_exit_preview_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    city = _paper_city_optional(payload)
+    market_buckets = _paper_market_buckets_from_payload(payload, city=city)
+    return _paper_storage(payload).paper_exit_preview(
+        account_key=_paper_account_key(payload),
+        position_key=_optional_text(payload.get("positionKey") or payload.get("position_key")),
+        market_buckets=market_buckets,
+        shares=_payload_float(payload, "shares"),
+        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+        target_profit=_paper_number(payload, 0.10, "targetProfit"),
+        signal_edge=_payload_float(payload, "signalEdge", "edge"),
+        min_cashout_ratio=_paper_number(payload, 0.50, "minCashoutRatio"),
+    )
+
+
+def paper_hedge_preview_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    city = _paper_city_optional(payload)
+    context = _paper_context_from_payload(payload, city=city)
+    market_buckets = _paper_market_buckets_from_payload(payload, city=city)
+    return _paper_storage(payload).paper_hedge_preview(
+        signals=_paper_signals_from_payload(payload),
+        market_buckets=market_buckets,
+        account_key=_paper_account_key(payload),
+        initial_cash=_paper_initial_cash(payload),
+        context=context,
+        stake_usdc=_paper_stake(payload),
+        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+        target_profit=_paper_number(payload, 0.0, "targetProfit"),
+        tail_probability_cutoff=_paper_number(payload, 0.05, "tailProbabilityCutoff"),
+        max_tail_probability=_paper_number(payload, 0.05, "maxTailProbability"),
+        min_adjacent_probability=_paper_number(payload, 0.10, "minAdjacentProbability"),
+    )
+
+
+def llm_summary_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    kind = str(payload.get("kind") or "").strip()
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("result must be an object.")
+    return OpenAILlmSummaryClient().summarize(kind=kind, result=result)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     handlers = {
@@ -923,8 +1442,21 @@ def main(argv: list[str] | None = None) -> int:
         "forecast": forecast_payload,
         "ensemble": ensemble_payload,
         "ensemble-signal": ensemble_signal_payload,
+        "llm-summary": llm_summary_payload,
         "db-runs": db_runs_payload,
         "db-probabilities": db_probabilities_payload,
+        "settlement-import": settlement_import_payload,
+        "settlement-reconcile": settlement_reconcile_payload,
+        "settlements-recent": settlements_recent_payload,
+        "signal-outcomes": signal_outcomes_payload,
+        "calibration": calibration_payload,
+        "paper-preview": paper_preview_payload,
+        "paper-buy": paper_buy_payload,
+        "paper-portfolio": paper_portfolio_payload,
+        "paper-mark": paper_mark_payload,
+        "paper-reconcile": paper_reconcile_payload,
+        "paper-exit-preview": paper_exit_preview_payload,
+        "paper-hedge-preview": paper_hedge_preview_payload,
     }
     if not args or args[0] not in handlers:
         print(

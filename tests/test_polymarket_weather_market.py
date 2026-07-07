@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+from weather_quant import runtime_logs
+from weather_quant.http import HttpClientError
 from weather_quant.market import GammaMarketClient, parse_market_buckets
 
 
@@ -96,6 +102,62 @@ class MarketParsingTest(unittest.TestCase):
 
         self.assertEqual([bucket.price for bucket in buckets], [0.31, 0.27])
         self.assertEqual([bucket.token_id for bucket in buckets], ["a", "c"])
+
+    def test_orderbook_fetch_failure_keeps_market_bucket(self) -> None:
+        class FakeCache:
+            def get(self, key, *, max_age_seconds=None):  # noqa: ANN001
+                return None
+
+            def set(self, key, value):  # noqa: ANN001
+                return None
+
+        class FakeHttpClient:
+            def get_json(self, path: str, *, params=None, headers=None):  # noqa: ANN001
+                return [
+                    {
+                        "id": "1",
+                        "question": "Will NYC high temperature be 84 to 85°F on July 3?",
+                        "slug": "nyc-84-85",
+                        "outcomes": '["Yes", "No"]',
+                        "outcomePrices": '["0.31", "0.69"]',
+                        "clobTokenIds": '["yes-token", "no-token"]',
+                    },
+                ]
+
+        class FailingClobHttpClient:
+            def get_json(self, path: str, *, params=None, headers=None):  # noqa: ANN001
+                raise HttpClientError("GET /book failed: ssl eof")
+
+        client = GammaMarketClient(
+            http_client=FakeHttpClient(),
+            clob_http_client=FailingClobHttpClient(),
+            cache=FakeCache(),
+        )
+
+        with tempfile.TemporaryDirectory() as logdir:
+            with mock.patch.object(runtime_logs, "LOG_DIR", Path(logdir)):
+                buckets = client.get_market_buckets(
+                    query="NYC high temperature July 3",
+                    include_orderbooks=True,
+                )
+            log_entries = [
+                json.loads(line)
+                for path in Path(logdir).glob("*.log")
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(len(buckets), 1)
+        self.assertEqual(buckets[0].price, 0.31)
+        self.assertIsNone(buckets[0].orderbook)
+        self.assertTrue(
+            any(
+                entry["source"] == "external_api"
+                and entry["details"]["provider"] == "polymarket-clob"
+                and entry["details"]["endpoint"] == "/book"
+                and entry["details"]["token_id"] == "yes-token"
+                for entry in log_entries
+            )
+        )
 
     def test_discover_weather_buckets_from_events_keyset_pages(self) -> None:
         class FakeCache:

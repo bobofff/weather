@@ -2,6 +2,10 @@ const $ = (id) => document.getElementById(id);
 const API_BASE = window.WEATHER_API_BASE || window.location.origin;
 const SELECTED_CITY_STORAGE_KEY = "weatherSelectedCityId";
 let cityRecords = [];
+let latestEnsembleSignalResult = null;
+let latestPortfolioResult = null;
+let latestPaperPortfolioResult = null;
+let latestPaperMonitorResult = null;
 
 const samplePositions = `outcome,shares,total_cost,price,best_bid,best_ask,probability
 84 to 85,100,32,0.50,0.46,0.54,0.34
@@ -31,6 +35,48 @@ function temperature(value, unit) {
 function pct(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   return `${(Number(value) * 100).toFixed(2)}%`;
+}
+
+function compactNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const rounded = Math.round(number * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+function bucketBoundary(value, direction) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const adjusted = direction === "lower" ? number + 0.5 : number - 0.5;
+  return Number.isInteger(adjusted) ? compactNumber(adjusted) : compactNumber(number);
+}
+
+function compactBucketKeyLabel(key) {
+  const parts = String(key || "").split(":");
+  if (parts.length !== 3) return null;
+  const lower = parts[1] === "-inf" ? null : Number(parts[1]);
+  const upper = parts[2] === "inf" ? null : Number(parts[2]);
+  const lowerLabel = lower === null ? null : bucketBoundary(lower, "lower");
+  const upperLabel = upper === null ? null : bucketBoundary(upper, "upper");
+  if (lower === null && upperLabel) return `${upperLabel} or below`;
+  if (upper === null && lowerLabel) return `${lowerLabel} or above`;
+  if (lowerLabel && upperLabel) return lowerLabel === upperLabel ? lowerLabel : `${lowerLabel} to ${upperLabel}`;
+  return null;
+}
+
+function compactBucketLabel(label, key) {
+  const keyLabel = compactBucketKeyLabel(key);
+  if (keyLabel) return keyLabel;
+  const text = String(label || "").trim();
+  if (!text) return "-";
+  const rangeMatch = text.match(/(-?\d+(?:\.\d+)?)\s*(?:-|to|through|and|到|至)\s*(-?\d+(?:\.\d+)?)/i);
+  if (rangeMatch) return `${compactNumber(rangeMatch[1])} to ${compactNumber(rangeMatch[2])}`;
+  const temperatureMatch = text.match(/(-?\d+(?:\.\d+)?)\s*(?:°\s*)?[CF]\b/i);
+  const numberLabel = temperatureMatch ? compactNumber(temperatureMatch[1]) : null;
+  if (numberLabel && /\b(?:below|under|lower)\b|以下|低于|不高于/i.test(text)) return `${numberLabel} or below`;
+  if (numberLabel && /\b(?:above|over|higher)\b|以上|高于|不低于/i.test(text)) return `${numberLabel} or above`;
+  if (numberLabel) return numberLabel;
+  return text.length > 18 ? `${text.slice(0, 18)}...` : text;
 }
 
 function numberValue(value) {
@@ -170,9 +216,29 @@ function showNotice(message, isError = false) {
   const notice = $("notice");
   notice.hidden = !message;
   notice.textContent = message || "";
-  notice.style.borderColor = isError ? "#fecdca" : "#fed7aa";
-  notice.style.color = isError ? "#b42318" : "#b54708";
-  notice.style.background = isError ? "#fef3f2" : "#fff7ed";
+  notice.style.borderColor = isError ? "var(--notice-error-line)" : "var(--notice-warn-line)";
+  notice.style.color = isError ? "var(--notice-error-text)" : "var(--notice-warn-text)";
+  notice.style.background = isError ? "var(--notice-error-bg)" : "var(--notice-warn-bg)";
+}
+
+function syncLlmButtons() {
+  const signalButton = $("explainSignalButton");
+  const portfolioButton = $("explainPortfolioButton");
+  if (signalButton) signalButton.disabled = !latestEnsembleSignalResult;
+  if (portfolioButton) portfolioButton.disabled = !latestPortfolioResult;
+  const hasSignals = Boolean(latestEnsembleSignalResult?.signals?.length);
+  const previewButton = $("paperPreviewButton");
+  const buyButton = $("paperBuyButton");
+  const hedgeButton = $("paperHedgePreviewButton");
+  if (previewButton) previewButton.disabled = !hasSignals;
+  if (buyButton) buyButton.disabled = !hasSignals;
+  if (hedgeButton) hedgeButton.disabled = !hasSignals;
+}
+
+function showLlmSummary(summary) {
+  const target = $("llmSummary");
+  if (!target) return;
+  target.textContent = summary || "";
 }
 
 function selectedCityOption() {
@@ -311,6 +377,244 @@ function ensemblePayload(includeMarketBuckets = false) {
   };
 }
 
+function settlementPayload() {
+  const city = selectedCityRecord();
+  return {
+    city: $("citySelect").value,
+    ...customLocationPayload(),
+    unit: city?.settlementUnit || $("unit").value,
+    targetDate: $("targetDate").value,
+    temperatureKind: $("temperatureKind").value,
+    marketSlug: $("marketSlug").value,
+    conditionId: $("conditionId").value,
+    marketQuery: $("marketQuery").value,
+    includeOrderbooks: $("includeOrderbooks").checked,
+    includeMarketBuckets: true,
+  };
+}
+
+function bestPaperSignal() {
+  const signals = latestEnsembleSignalResult?.signals || [];
+  const buySignals = signals
+    .map(signalWithDerived)
+    .filter((row) => row.recommendation === "BUY_YES")
+    .sort((left, right) => (right._edge ?? -99) - (left._edge ?? -99));
+  return buySignals[0] || null;
+}
+
+function paperPayload(signal = bestPaperSignal()) {
+  const city = selectedCityRecord();
+  const latest = latestEnsembleSignalResult || {};
+  const targetProfitInput = $("paperTargetProfit") || $("targetProfit");
+  const minCashoutInput = $("paperMinCashoutRatio") || $("minCashoutRatio");
+  return {
+    city: $("citySelect").value,
+    ...customLocationPayload(),
+    unit: city?.settlementUnit || $("unit").value,
+    targetDate: $("targetDate").value,
+    temperatureKind: $("temperatureKind").value,
+    marketSlug: $("marketSlug").value,
+    conditionId: $("conditionId").value,
+    marketQuery: $("marketQuery").value,
+    marketsCsv: $("marketsCsv").value,
+    includeOrderbooks: $("includeOrderbooks").checked,
+    initialCash: Number($("paperInitialCash").value),
+    stakeUsdc: Number($("paperStake").value),
+    minEdge: Number($("minEdge").value),
+    feeRate: Number($("feeRate").value),
+    maxSpread: Number($("paperMaxSpread").value),
+    minAskDepthShares: Number($("paperMinAskDepth").value),
+    maxMarketExposure: Number($("paperMaxMarketExposure").value),
+    maxCityDateExposure: Number($("paperMaxCityDateExposure").value),
+    targetProfit: Number(targetProfitInput?.value || 0.10),
+    minCashoutRatio: Number(minCashoutInput?.value || 0.50),
+    tailProbabilityCutoff: Number($("tailProbabilityCutoff").value),
+    maxTailProbability: Number($("maxTailProbability").value),
+    summary: latest.summary || {},
+    signals: latest.signals || [],
+    signal,
+    marketBuckets: latest.marketBuckets || [],
+  };
+}
+
+function paperMarkPayload() {
+  const targetProfitInput = $("paperTargetProfit") || $("targetProfit");
+  const minCashoutInput = $("paperMinCashoutRatio") || $("minCashoutRatio");
+  return {
+    initialCash: Number($("paperInitialCash").value || 1000),
+    feeRate: Number($("feeRate").value || 0.05),
+    targetProfit: Number(targetProfitInput?.value || 0.10),
+    minCashoutRatio: Number(minCashoutInput?.value || 0.50),
+    markCacheSeconds: 5,
+    limit: 20,
+  };
+}
+
+function rejectReasonName(value) {
+  const reason = String(value || "");
+  const labels = {
+    NO_BUY_SIGNAL: "非 BUY_YES",
+    EDGE_TOO_LOW: "Edge 不足",
+    NO_ASK: "无 ask",
+    INSUFFICIENT_BALANCE: "余额不足",
+    SPREAD_TOO_WIDE: "Spread 过宽",
+    INSUFFICIENT_DEPTH: "Ask 深度不足",
+    EXPOSURE_LIMIT: "暴露超限",
+    MISSING_SETTLEMENT_SOURCE: "缺少结算站配置",
+    NO_BID: "无 bid",
+  };
+  return labels[reason] || reason || "-";
+}
+
+function paperStatusTone(value) {
+  const status = String(value || "");
+  if (status === "FILLED" || status === "OPEN" || status === "ACCEPTED") return "";
+  if (status === "REJECTED" || status === "SETTLED") return status === "REJECTED" ? "danger" : "warn";
+  return "warn";
+}
+
+function renderPaperPreview(preview) {
+  const target = $("paperPreview");
+  if (!target) return;
+  if (!preview) {
+    target.innerHTML = "<h2>买入 Preview</h2>";
+    return;
+  }
+  const metrics = [
+    metric("状态", preview.accepted ? "可虚拟买入" : "拒绝", preview.accepted ? "good" : "bad"),
+    metric("拒绝原因", rejectReasonName(preview.rejectReason)),
+    metric("温度桶", compactBucketLabel(preview.bucketLabel || preview.outcome, preview.bucketKey)),
+    metric("模型概率", pct(preview.ensembleProbability)),
+    metric("入场 VWAP", price(preview.vwap ?? preview.executableEntryCost)),
+    metric("Fee", money(preview.fee)),
+    metric("Shares", money(preview.filledShares)),
+    metric("Edge", signedPct(preview.edge)),
+    metric("Net cost", money(preview.netCost)),
+    metric("Spread", price(preview.spread)),
+    metric("Ask 深度", money(preview.askDepth)),
+    metric("虚拟单", preview.noRealOrder ? "是" : "否"),
+  ].join("");
+  target.innerHTML = `<h2>买入 Preview</h2><div class="metrics paper-metrics">${metrics}</div>`;
+}
+
+function renderPaperHedgePreview(result) {
+  const target = $("paperHedgePreview");
+  if (!target) return;
+  if (!result) {
+    target.innerHTML = "<h2>Hedge Preview</h2>";
+    return;
+  }
+  const summary = result.summary || {};
+  const adjacent = result.adjacent || {};
+  const tail = result.tailRiskLock || {};
+  const metrics = [
+    metric("相邻桶建议", adjacent.recommendation || "-"),
+    metric("主桶", adjacent.mainOutcome || "-"),
+    metric("邻桶", adjacent.adjacentOutcome || "-"),
+    metric("邻桶概率", pct(adjacent.adjacentProbability)),
+    metric("Covered probability", pct(summary.coveredProbability)),
+    metric("Tail risk", pct(summary.uncoveredTailProbability)),
+    metric("Covered worst PnL", money(summary.coveredWorstCasePnl)),
+    metric("Global worst PnL", money(summary.globalWorstCasePnl)),
+    metric("Tail lock", summary.isTailRiskLock ? "是" : "否", summary.isTailRiskLock ? "good" : "watch"),
+    metric("真套利", summary.isTrueArbitrage ? "是" : "否"),
+  ].join("");
+  const hedgeRows = (tail.hedgeLegs || []).map((row) => `<tr>
+    <td>${escapeHtml(row.outcome)}</td>
+    <td>${money(row.shares)}</td>
+    <td>${price(row.price)}</td>
+    <td>${money(row.totalCost ?? row.cost)}</td>
+  </tr>`);
+  target.innerHTML = `
+    <h2>Hedge Preview</h2>
+    <div class="metrics paper-metrics">${metrics}</div>
+    ${table(["温度桶", "份额", "价格", "成本"], hedgeRows)}
+  `;
+}
+
+function renderPaperPortfolio(result) {
+  const portfolio = result?.portfolio || result || {};
+  latestPaperPortfolioResult = portfolio;
+  const summary = portfolio.summary || {};
+  const summaryMetrics = [
+    metric("现金", money(summary.cash)),
+    metric("持仓成本", money(summary.openPositionCost)),
+    metric("Mark value", money(summary.markValue)),
+    metric("可兑现值", money(summary.liquidationValue)),
+    metric("Realized PnL", money(summary.realizedPnl), Number(summary.realizedPnl) >= 0 ? "good" : "bad"),
+    metric("Unrealized PnL", money(summary.unrealizedPnl), Number(summary.unrealizedPnl) >= 0 ? "good" : "bad"),
+    metric("Total equity", money(summary.totalEquity)),
+    metric("OPEN 持仓", String(summary.openPositionCount ?? 0)),
+  ].join("");
+  $("paperSummary").innerHTML = `<div class="metrics paper-metrics">${summaryMetrics}</div>`;
+  const orderRows = (portfolio.orders || []).map((row) => `<tr>
+    <td>${escapeHtml(row.createdAt || "-")}</td>
+    <td>${escapeHtml(compactBucketLabel(row.bucketLabel || row.outcome, row.bucketKey))}</td>
+    <td>${money(row.stakeUsdc)}</td>
+    <td>${money(row.filledShares)}</td>
+    <td>${price(row.vwap)}</td>
+    <td>${signedPct(row.edge)}</td>
+    <td><span class="badge ${paperStatusTone(row.status)}">${escapeHtml(row.status || "-")}</span></td>
+    <td>${escapeHtml(rejectReasonName(row.rejectReason))}</td>
+  </tr>`);
+  const positionRows = (portfolio.positions || []).map((row) => `<tr>
+    <td>${escapeHtml(compactBucketLabel(row.bucketLabel || row.outcome, row.bucketKey))}</td>
+    <td>${money(row.openShares)}</td>
+    <td>${money(row.totalCost)}</td>
+    <td>${price(row.averageEntryPrice)}</td>
+    <td>${price(row.bestBid)}</td>
+    <td>${price(row.bestAsk)}</td>
+    <td>${money(row.markValue)}</td>
+    <td>${money(row.liquidationValue)}</td>
+    <td>${money(row.realizedPnl)}</td>
+    <td>${money(row.unrealizedPnl)}</td>
+    <td>${escapeHtml(row.latestMark?.exitSignal || "-")}</td>
+    <td><span class="badge ${paperStatusTone(row.status)}">${escapeHtml(row.status || "-")}</span></td>
+  </tr>`);
+  $("paperOrders").innerHTML = `<h2>最近虚拟订单</h2>${table(["时间", "温度桶", "Stake", "Shares", "VWAP", "Edge", "状态", "拒绝原因"], orderRows)}`;
+  $("paperPositions").innerHTML = `<h2>虚拟持仓</h2>${table(["温度桶", "Shares", "成本", "均价", "Bid", "Ask", "Mark", "可兑现", "Realized", "Unrealized", "退出信号", "状态"], positionRows)}`;
+  renderPaperMarks(portfolio.marks || []);
+}
+
+function renderPaperMarks(marks) {
+  const target = $("paperMarks");
+  if (!target) return;
+  const rows = (marks || []).map((row) => `<tr>
+    <td>${escapeHtml(row.fetchedAt || "-")}</td>
+    <td>${escapeHtml(compactBucketLabel(row.bucketLabel || row.outcome, row.bucketKey))}</td>
+    <td>${price(row.bestBid)}</td>
+    <td>${price(row.bestAsk)}</td>
+    <td>${price(row.spread)}</td>
+    <td>${money(row.bidDepth)}</td>
+    <td>${money(row.markValue)}</td>
+    <td>${money(row.liquidationValue)}</td>
+    <td>${money(row.executablePnl)}</td>
+    <td>${escapeHtml(row.exitSignal || "-")}</td>
+    <td>${escapeHtml(rejectReasonName(row.warning))}</td>
+  </tr>`);
+  target.innerHTML = `<h2>持仓盘口轮询</h2>${table(["时间", "温度桶", "Bid", "Ask", "Spread", "Bid 深度", "Mark", "可兑现", "Exec PnL", "退出信号", "警告"], rows)}`;
+}
+
+function renderPaperMonitorStatus(result) {
+  const target = $("paperMonitorStatus");
+  if (!target) return;
+  const monitor = result?.monitor || result || {};
+  latestPaperMonitorResult = monitor;
+  const lastSummary = monitor.lastResult?.summary || {};
+  const metrics = [
+    metric("轮询", monitor.enabled ? "运行中" : "已停止", monitor.enabled ? "good" : "watch"),
+    metric("执行中", monitor.running ? "是" : "否", monitor.running ? "watch" : ""),
+    metric("间隔", `${monitor.intervalMs || "-"} ms`),
+    metric("Tick", String(monitor.tickCount ?? 0)),
+    metric("上次 mark", monitor.lastFinishedAt || "-"),
+    metric("上次持仓", String(lastSummary.openPositionCount ?? "-")),
+    metric("上次快照", String(lastSummary.markCount ?? "-")),
+    metric("连续错误", String(monitor.consecutiveErrors ?? 0), Number(monitor.consecutiveErrors) > 0 ? "bad" : ""),
+  ].join("");
+  const errorHtml = monitor.lastError ? `<p class="notice error">最近错误：${escapeHtml(monitor.lastError)}</p>` : "";
+  target.innerHTML = `<div class="metrics paper-metrics paper-monitor-metrics">${metrics}</div>${errorHtml}`;
+}
+
 function levelText(levels) {
   if (!levels || !levels.length) return "-";
   return levels
@@ -331,6 +635,7 @@ function renderForecast(result) {
     metric("均值", temperature(summary.mean, summary.unit)),
     metric("范围", `${temperature(summary.min, summary.unit)} / ${temperature(summary.max, summary.unit)}`),
     metric("模型数", summary.modelCount ?? "-"),
+    metric("失败模型", summary.failedModelCount ?? 0, summary.failedModelCount ? "watch" : ""),
   ].join("");
   const rows = result.points.map((row) => `<tr>
     <td>${escapeHtml(modelName(row.sourceModel))}</td>
@@ -344,15 +649,23 @@ function renderForecast(result) {
     ["模型", "温度", "来源", "粒度", "结算站", "生成时间"],
     rows,
   )}`;
-  showNotice(`已获取 ${summary.modelCount} 个天气模型预报。`);
+  const warnings = Array.isArray(summary.warnings) ? summary.warnings : [];
+  showNotice(
+    warnings.length
+      ? `已获取 ${summary.modelCount} 个天气模型预报，${warnings.length} 个模型失败：${warnings.join("；")}`
+      : `已获取 ${summary.modelCount} 个天气模型预报。`,
+    false,
+  );
 }
 
 function probabilityChart(chart) {
-  const labels = chart.bucketLabels || [];
+  const rawLabels = chart.bucketLabels || [];
+  const bucketKeys = chart.bucketKeys || [];
+  const labels = rawLabels.map((label, index) => compactBucketLabel(label, bucketKeys[index]));
   const probabilities = chart.bucketProbabilities || [];
   const market = chart.marketImpliedProbabilities || [];
   const members = chart.memberValues || [];
-  const width = Math.max(720, labels.length * 82 + 80);
+  const width = Math.max(1120, labels.length * 112 + 80);
   const height = 300;
   const left = 44;
   const right = 24;
@@ -372,10 +685,13 @@ function probabilityChart(chart) {
     const marketY = marketProbability === null || marketProbability === undefined
       ? null
       : top + plotHeight - (marketProbability / maxProb) * plotHeight;
+    const title = String(rawLabels[index] || "") !== label
+      ? `<title>${escapeHtml(rawLabels[index] || "")}</title>`
+      : "";
     return `
-      <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="3" fill="#2563eb"></rect>
-      ${marketY === null ? "" : `<circle cx="${(x + barWidth / 2).toFixed(1)}" cy="${marketY.toFixed(1)}" r="4" fill="#b42318"></circle>`}
-      <text class="chart-label" x="${(x + barWidth / 2).toFixed(1)}" y="${height - 42}" text-anchor="middle">${escapeHtml(label)}</text>
+      <rect class="chart-bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="3"></rect>
+      ${marketY === null ? "" : `<circle class="chart-market-dot" cx="${(x + barWidth / 2).toFixed(1)}" cy="${marketY.toFixed(1)}" r="4"></circle>`}
+      <text class="chart-label" x="${(x + barWidth / 2).toFixed(1)}" y="${height - 42}" text-anchor="middle">${title}${escapeHtml(label)}</text>
       <text class="chart-label" x="${(x + barWidth / 2).toFixed(1)}" y="${Math.max(14, y - 6).toFixed(1)}" text-anchor="middle">${pct(probability)}</text>
     `;
   }).join("");
@@ -385,13 +701,13 @@ function probabilityChart(chart) {
     if (bucketIndex === undefined) return "";
     const jitter = ((index % 7) - 3) * 3;
     const x = left + bucketIndex * slot + slot / 2 + jitter;
-    return `<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${height - 34}" y2="${height - 24}" stroke="#0f766e" stroke-width="1.5"></line>`;
+    return `<line class="chart-member-rug" x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${height - 34}" y2="${height - 24}" stroke-width="1.5"></line>`;
   }).join("");
   return `
     <div class="chart-wrap">
       <svg class="prob-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Ensemble probability chart">
-        <line x1="${left}" y1="${top + plotHeight}" x2="${width - right}" y2="${top + plotHeight}" stroke="#d9dee8"></line>
-        <line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}" stroke="#d9dee8"></line>
+        <line class="chart-axis" x1="${left}" y1="${top + plotHeight}" x2="${width - right}" y2="${top + plotHeight}"></line>
+        <line class="chart-axis" x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}"></line>
         ${bars}
         ${rug}
       </svg>
@@ -414,7 +730,7 @@ function renderEnsemble(result) {
     metric("保存", summary.saved ? "是" : "否"),
   ].join("");
   const probabilityRows = result.probabilities.map((row) => `<tr>
-    <td>${escapeHtml(row.bucketLabel)}</td>
+    <td title="${escapeHtml(row.bucketLabel)}">${escapeHtml(compactBucketLabel(row.bucketLabel, row.bucketKey))}</td>
     <td>${money(row.hitCount)}</td>
     <td>${money(row.totalMembers)}</td>
     <td>${pct(row.probability)}</td>
@@ -506,7 +822,70 @@ function renderSignalPanel(signals, summary) {
   `;
 }
 
-function renderHistory(runsResult, probabilitiesResult) {
+function statusName(value) {
+  const status = String(value || "");
+  if (status === "success" || status === "settled") return "成功";
+  if (status === "failed") return "失败";
+  return status || "-";
+}
+
+function statusTone(value) {
+  const status = String(value || "");
+  if (status === "failed") return "danger";
+  if (status === "success" || status === "settled") return "";
+  return "warn";
+}
+
+function renderCalibration(calibrationResult) {
+  const summary = calibrationResult.summary || {};
+  const metrics = [
+    metric("已复盘信号", summary.outcomeCount ?? 0),
+    metric("命中率", pct(summary.hitRate)),
+    metric("平均 Brier", price(summary.averageBrierScore)),
+    metric("平均误差", signedPct(summary.averageProbabilityError)),
+    metric("买入信号", summary.buySignalCount ?? 0),
+    metric("买入命中率", pct(summary.buySignalHitRate)),
+  ].join("");
+  const binRows = (calibrationResult.probabilityBins || [])
+    .filter((row) => Number(row.count) > 0)
+    .map((row) => `<tr>
+      <td>${escapeHtml(row.label)}</td>
+      <td>${money(row.count)}</td>
+      <td>${pct(row.averageProbability)}</td>
+      <td>${pct(row.observedRate)}</td>
+      <td>${price(row.averageBrierScore)}</td>
+    </tr>`);
+  $("calibrationSummary").innerHTML = `
+    <div class="metrics">${metrics}</div>
+    ${table(["概率桶", "数量", "平均预测", "实际命中", "Brier"], binRows)}
+  `;
+}
+
+function renderHistory(
+  runsResult,
+  probabilitiesResult,
+  settlementsResult = {},
+  outcomesResult = {},
+  calibrationResult = {},
+) {
+  renderCalibration(calibrationResult);
+  const settlementRows = (settlementsResult.settlements || []).map((row) => `<tr>
+    <td>${escapeHtml(row.city_id)}</td>
+    <td>${escapeHtml(row.target_date)}</td>
+    <td>${escapeHtml(kindName(row.kind))}</td>
+    <td>${temperature(row.observed_value, row.unit)}</td>
+    <td>${escapeHtml(row.bucket_label || "-")}</td>
+    <td><span class="badge ${statusTone(row.status)}">${escapeHtml(statusName(row.status))}</span></td>
+  </tr>`);
+  const outcomeRows = (outcomesResult.outcomes || []).map((row) => `<tr>
+    <td>${escapeHtml(row.city_id)}</td>
+    <td>${escapeHtml(row.target_date)}</td>
+    <td>${escapeHtml(row.outcome)}</td>
+    <td>${pct(row.ensemble_probability)}</td>
+    <td>${signedPct(row.edge)}</td>
+    <td><span class="badge ${row.won ? "" : "danger"}">${row.won ? "命中" : "未中"}</span></td>
+    <td>${price(row.brier_score)}</td>
+  </tr>`);
   const runRows = (runsResult.runs || []).map((row) => `<tr>
     <td>${escapeHtml(row.city_id)}</td>
     <td>${escapeHtml(row.model)}</td>
@@ -519,6 +898,8 @@ function renderHistory(runsResult, probabilitiesResult) {
     <td>${pct(row.probability)}</td>
     <td>${money(row.hit_count)} / ${money(row.total_members)}</td>
   </tr>`);
+  $("recentSettlements").innerHTML = `<h2>最近结算</h2>${table(["城市", "日期", "类型", "实际温度", "命中桶", "状态"], settlementRows)}`;
+  $("recentOutcomes").innerHTML = `<h2>最近 Outcomes</h2>${table(["城市", "日期", "温度桶", "预测概率", "Edge", "结果", "Brier"], outcomeRows)}`;
   $("recentRuns").innerHTML = `<h2>最近 Runs</h2>${table(["城市", "模型", "日期", "类型", "成员"], runRows)}`;
   $("recentProbabilities").innerHTML = `<h2>最近 Probabilities</h2>${table(["温度桶", "概率", "命中"], probabilityRows)}`;
 }
@@ -730,6 +1111,10 @@ async function fetchEnsemble(endpoint = "ensemble") {
     });
     const result = await readJsonResponse(response, "获取 ensemble 失败");
     renderEnsemble(result);
+    if (endpoint === "ensemble-signal") {
+      latestEnsembleSignalResult = result;
+      syncLlmButtons();
+    }
     await loadHistory();
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
@@ -740,15 +1125,82 @@ async function fetchEnsemble(endpoint = "ensemble") {
 
 async function loadHistory() {
   try {
-    const [runsResponse, probabilitiesResponse] = await Promise.all([
+    const [
+      runsResponse,
+      probabilitiesResponse,
+      settlementsResponse,
+      outcomesResponse,
+      calibrationResponse,
+    ] = await Promise.all([
       fetch(`${API_BASE}/api/db/runs?limit=8`),
       fetch(`${API_BASE}/api/db/probabilities?limit=10`),
+      fetch(`${API_BASE}/api/settlements/recent?limit=8`),
+      fetch(`${API_BASE}/api/signals/outcomes?limit=10`),
+      fetch(`${API_BASE}/api/calibration`),
     ]);
     const runs = await readJsonResponse(runsResponse, "读取 runs 失败");
     const probabilities = await readJsonResponse(probabilitiesResponse, "读取 probabilities 失败");
-    renderHistory(runs, probabilities);
+    const settlements = await readJsonResponse(settlementsResponse, "读取 settlements 失败");
+    const outcomes = await readJsonResponse(outcomesResponse, "读取 outcomes 失败");
+    const calibration = await readJsonResponse(calibrationResponse, "读取 calibration 失败");
+    renderHistory(runs, probabilities, settlements, outcomes, calibration);
   } catch {
-    renderHistory({ runs: [] }, { probabilities: [] });
+    renderHistory(
+      { runs: [] },
+      { probabilities: [] },
+      { settlements: [] },
+      { outcomes: [] },
+      { summary: {}, probabilityBins: [] },
+    );
+  }
+}
+
+async function importSettlement() {
+  const button = $("importSettlementButton");
+  button.disabled = true;
+  showNotice("正在通过结算接口导入观测...");
+  try {
+    const response = await fetch(`${API_BASE}/api/settlements/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settlementPayload()),
+    });
+    const result = await readJsonResponse(response, "导入结算失败");
+    const summary = result.summary || {};
+    if (summary.status === "failed") {
+      showNotice(summary.errorMessage || "结算接口导入失败", true);
+    } else {
+      showNotice(`结算已导入，匹配 ${summary.outcomeCount || 0} 条历史信号。`);
+    }
+    await loadHistory();
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function reconcileSignals() {
+  const button = $("reconcileSignalsButton");
+  button.disabled = true;
+  showNotice("正在重新匹配历史信号...");
+  try {
+    const response = await fetch(`${API_BASE}/api/signals/reconcile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cityId: $("citySelect").value,
+        targetDate: $("targetDate").value,
+        kind: $("temperatureKind").value,
+      }),
+    });
+    const result = await readJsonResponse(response, "重新匹配失败");
+    showNotice(`已匹配 ${result.summary?.outcomeCount || 0} 条历史信号。`);
+    await loadHistory();
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -763,11 +1215,245 @@ async function run() {
       body: JSON.stringify(payload()),
     });
     const result = await readJsonResponse(response, "组合评估失败");
+    latestPortfolioResult = result;
+    syncLlmButtons();
     render(result);
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
   } finally {
     button.disabled = false;
+  }
+}
+
+async function loadPaperPortfolio() {
+  try {
+    const params = new URLSearchParams({
+      initialCash: String(Number($("paperInitialCash").value || 1000)),
+      limit: "10",
+    });
+    const response = await fetch(`${API_BASE}/api/paper/portfolio?${params.toString()}`);
+    const result = await readJsonResponse(response, "读取虚拟盘失败");
+    renderPaperPortfolio(result);
+  } catch {
+    renderPaperPortfolio({ summary: {}, orders: [], positions: [] });
+  }
+}
+
+async function loadPaperMonitorStatus() {
+  try {
+    const response = await fetch(`${API_BASE}/api/paper/monitor/status`);
+    const result = await readJsonResponse(response, "读取虚拟盘轮询状态失败");
+    renderPaperMonitorStatus(result);
+  } catch (error) {
+    renderPaperMonitorStatus({
+      enabled: false,
+      running: false,
+      intervalMs: Number($("paperMonitorIntervalMs")?.value || 60000),
+      lastError: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function refreshPaperMarks() {
+  const button = $("paperMarkButton");
+  button.disabled = true;
+  showNotice("正在刷新持仓盘口...");
+  try {
+    const response = await fetch(`${API_BASE}/api/paper/monitor/tick`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(paperMarkPayload()),
+    });
+    const result = await readJsonResponse(response, "刷新持仓盘口失败");
+    renderPaperMonitorStatus(result);
+    renderPaperPortfolio(result.result || result);
+    const summary = result.result?.summary || result.summary || {};
+    if (summary.skippedReason === "NO_OPEN_POSITIONS") {
+      showNotice("当前没有 OPEN 虚拟持仓，轮询本次跳过。");
+    } else {
+      showNotice(`持仓盘口已刷新：${summary.markCount || 0} 个快照，${summary.warningCount || 0} 个警告。`);
+    }
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function startPaperMonitor() {
+  const button = $("paperMonitorStartButton");
+  button.disabled = true;
+  showNotice("正在启动虚拟盘持仓轮询...");
+  try {
+    const payload = {
+      ...paperMarkPayload(),
+      intervalMs: Number($("paperMonitorIntervalMs").value || 60000),
+    };
+    const response = await fetch(`${API_BASE}/api/paper/monitor/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await readJsonResponse(response, "启动虚拟盘轮询失败");
+    renderPaperMonitorStatus(result);
+    showNotice("虚拟盘持仓轮询已启动。");
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function stopPaperMonitor() {
+  const button = $("paperMonitorStopButton");
+  button.disabled = true;
+  showNotice("正在停止虚拟盘持仓轮询...");
+  try {
+    const response = await fetch(`${API_BASE}/api/paper/monitor/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const result = await readJsonResponse(response, "停止虚拟盘轮询失败");
+    renderPaperMonitorStatus(result);
+    showNotice("虚拟盘持仓轮询已停止。");
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function requirePaperSignal() {
+  const signal = bestPaperSignal();
+  if (!signal) {
+    showNotice("请先运行 Ensemble Signal，并确保存在 BUY_YES 候选。", true);
+    return null;
+  }
+  return signal;
+}
+
+async function previewPaperBuy() {
+  const signal = requirePaperSignal();
+  if (!signal) return;
+  const button = $("paperPreviewButton");
+  button.disabled = true;
+  showNotice("正在计算虚拟买入 preview...");
+  try {
+    const response = await fetch(`${API_BASE}/api/paper/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(paperPayload(signal)),
+    });
+    const result = await readJsonResponse(response, "虚拟买入 preview 失败");
+    renderPaperPreview(result.preview);
+    renderPaperPortfolio(result);
+    showNotice(result.preview?.accepted ? "虚拟买入 preview 可执行。" : `虚拟买入被拒绝：${rejectReasonName(result.preview?.rejectReason)}`);
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    syncLlmButtons();
+  }
+}
+
+async function executePaperBuy() {
+  const signal = requirePaperSignal();
+  if (!signal) return;
+  const button = $("paperBuyButton");
+  button.disabled = true;
+  showNotice("正在保存虚拟买入...");
+  try {
+    const response = await fetch(`${API_BASE}/api/paper/buy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(paperPayload(signal)),
+    });
+    const result = await readJsonResponse(response, "虚拟买入失败");
+    renderPaperPreview(result.preview);
+    renderPaperPortfolio(result);
+    showNotice(result.summary?.accepted ? "虚拟买入已记录。" : `虚拟订单已拒绝并记录：${rejectReasonName(result.summary?.rejectReason)}`);
+    if (result.summary?.accepted) {
+      await refreshPaperMarks();
+      if (!latestPaperMonitorResult?.enabled) {
+        await startPaperMonitor();
+      }
+    }
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    syncLlmButtons();
+  }
+}
+
+async function previewPaperHedge() {
+  const signal = requirePaperSignal();
+  if (!signal) return;
+  const button = $("paperHedgePreviewButton");
+  button.disabled = true;
+  showNotice("正在计算 hedge preview...");
+  try {
+    const response = await fetch(`${API_BASE}/api/paper/hedge-preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(paperPayload(signal)),
+    });
+    const result = await readJsonResponse(response, "Hedge preview 失败");
+    renderPaperHedgePreview(result);
+    showNotice("Hedge preview 已更新。");
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    syncLlmButtons();
+  }
+}
+
+async function reconcilePaper() {
+  const button = $("paperReconcileButton");
+  button.disabled = true;
+  showNotice("正在结算虚拟盘...");
+  try {
+    const response = await fetch(`${API_BASE}/api/paper/reconcile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        initialCash: Number($("paperInitialCash").value),
+        cityId: $("citySelect").value,
+        targetDate: $("targetDate").value,
+        kind: $("temperatureKind").value,
+      }),
+    });
+    const result = await readJsonResponse(response, "虚拟盘结算失败");
+    renderPaperPortfolio(result);
+    showNotice(`虚拟盘结算 ${result.summary?.settledPositionCount || 0} 个持仓，Realized PnL ${money(result.summary?.realizedPnl)}。`);
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function explainResult(kind) {
+  const result = kind === "ensemble-signal" ? latestEnsembleSignalResult : latestPortfolioResult;
+  const button = kind === "ensemble-signal" ? $("explainSignalButton") : $("explainPortfolioButton");
+  if (!result) {
+    showNotice(kind === "ensemble-signal" ? "请先运行 Ensemble Signal。" : "请先评估组合。", true);
+    return;
+  }
+  button.disabled = true;
+  showNotice("正在生成 AI 解读...");
+  try {
+    const response = await fetch(`${API_BASE}/api/llm-summary`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, result }),
+    });
+    const payload = await readJsonResponse(response, "生成 AI 解读失败");
+    showLlmSummary(payload.summary || "-");
+    showNotice("AI 解读已生成。");
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    syncLlmButtons();
   }
 }
 
@@ -781,8 +1467,22 @@ async function init() {
   $("fetchEnsembleSignalButton").addEventListener("click", () => fetchEnsemble("ensemble-signal"));
   $("fetchMarketButton").addEventListener("click", fetchMarkets);
   $("runButton").addEventListener("click", run);
+  $("importSettlementButton").addEventListener("click", importSettlement);
+  $("reconcileSignalsButton").addEventListener("click", reconcileSignals);
+  $("paperPreviewButton").addEventListener("click", previewPaperBuy);
+  $("paperBuyButton").addEventListener("click", executePaperBuy);
+  $("paperMarkButton").addEventListener("click", refreshPaperMarks);
+  $("paperMonitorStartButton").addEventListener("click", startPaperMonitor);
+  $("paperMonitorStopButton").addEventListener("click", stopPaperMonitor);
+  $("paperHedgePreviewButton").addEventListener("click", previewPaperHedge);
+  $("paperReconcileButton").addEventListener("click", reconcilePaper);
+  $("explainSignalButton").addEventListener("click", () => explainResult("ensemble-signal"));
+  $("explainPortfolioButton").addEventListener("click", () => explainResult("portfolio"));
+  syncLlmButtons();
   await loadCities();
   await loadHistory();
+  await loadPaperPortfolio();
+  await loadPaperMonitorStatus();
 }
 
 void init();

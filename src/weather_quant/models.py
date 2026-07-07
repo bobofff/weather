@@ -101,6 +101,7 @@ class EnsembleForecast:
     target_date: date
     kind: TemperatureKind
     points: tuple[ForecastPoint, ...]
+    provider_warnings: tuple[str, ...] = ()
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property

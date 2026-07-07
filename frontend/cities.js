@@ -31,9 +31,9 @@ function showNotice(message, isError = false) {
   const notice = $("notice");
   notice.hidden = !message;
   notice.textContent = message || "";
-  notice.style.borderColor = isError ? "#fecdca" : "#fed7aa";
-  notice.style.color = isError ? "#b42318" : "#b54708";
-  notice.style.background = isError ? "#fef3f2" : "#fff7ed";
+  notice.style.borderColor = isError ? "var(--notice-error-line)" : "var(--notice-warn-line)";
+  notice.style.color = isError ? "var(--notice-error-text)" : "var(--notice-warn-text)";
+  notice.style.background = isError ? "var(--notice-error-bg)" : "var(--notice-warn-bg)";
 }
 
 function rememberCityId(cityId) {

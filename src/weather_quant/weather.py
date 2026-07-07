@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import date
 from typing import Any
 
@@ -19,10 +18,9 @@ from weather_quant.models import (
     TemperatureUnit,
 )
 from weather_quant.units import convert_temperature
-from weather_quant.runtime_logs import log_sync_event
+from weather_quant.runtime_logs import log_external_api_failure, log_sync_event
 
 
-LOGGER = logging.getLogger(__name__)
 OPEN_METEO_DAILY_FIELDS = {
     "high": "temperature_2m_max",
     "low": "temperature_2m_min",
@@ -72,6 +70,7 @@ class OpenMeteoForecastClient:
         self.http = http_client or JsonHttpClient(base_url=self.base_url)
         self.cache = cache or FileCache()
         self.cache_max_age_seconds = cache_max_age_seconds
+        self.last_errors: tuple[str, ...] = ()
 
     def fetch_point(
         self,
@@ -96,7 +95,24 @@ class OpenMeteoForecastClient:
         cache_key = {"provider": "open-meteo", "path": "/v1/forecast", "params": params}
         data = self.cache.get(cache_key, max_age_seconds=self.cache_max_age_seconds)
         if data is None:
-            data = self.http.get_json("/v1/forecast", params=params)
+            try:
+                data = self.http.get_json("/v1/forecast", params=params)
+            except Exception as exc:
+                log_external_api_failure(
+                    provider="open-meteo",
+                    action="fetch_forecast",
+                    endpoint="/v1/forecast",
+                    details={
+                        "city": city.city_id,
+                        "date": target_date.isoformat(),
+                        "kind": kind,
+                        "model": model,
+                    },
+                    error=exc,
+                )
+                raise WeatherProviderError(
+                    f"Open-Meteo forecast request failed for {model}: {exc}"
+                ) from exc
             self.cache.set(cache_key, data)
 
         try:
@@ -138,6 +154,7 @@ class OpenMeteoForecastClient:
     ) -> tuple[ForecastPoint, ...]:
         points: list[ForecastPoint] = []
         errors: list[str] = []
+        self.last_errors = ()
         for model in models:
             try:
                 points.append(
@@ -149,10 +166,11 @@ class OpenMeteoForecastClient:
                     )
                 )
             except Exception as exc:
-                LOGGER.warning("Open-Meteo model failed: %s", model, exc_info=exc)
                 errors.append(f"{model}: {exc}")
+        self.last_errors = tuple(errors)
         if not points:
-            raise WeatherProviderError("; ".join(errors) or "No Open-Meteo points fetched.")
+            message = "; ".join(errors) or "No Open-Meteo points fetched."
+            raise WeatherProviderError(f"Open-Meteo models failed: {message}")
         return tuple(points)
 
 
@@ -203,7 +221,24 @@ class OpenMeteoEnsembleClient:
         cache_key = {"provider": "open-meteo-ensemble", "path": "/v1/ensemble", "params": params}
         data = self.cache.get(cache_key, max_age_seconds=self.cache_max_age_seconds)
         if data is None:
-            data = self.http.get_json("/v1/ensemble", params=params)
+            try:
+                data = self.http.get_json("/v1/ensemble", params=params)
+            except Exception as exc:
+                log_external_api_failure(
+                    provider="open-meteo-ensemble",
+                    action="fetch_ensemble_run",
+                    endpoint="/v1/ensemble",
+                    details={
+                        "city": city.city_id,
+                        "date": target_date.isoformat(),
+                        "kind": kind,
+                        "model": model,
+                    },
+                    error=exc,
+                )
+                raise WeatherProviderError(
+                    f"Open-Meteo ensemble request failed for {model}: {exc}"
+                ) from exc
             self.cache.set(cache_key, data)
 
         try:
@@ -290,7 +325,22 @@ class NWSForecastClient:
         }
         points_data = self.cache.get(point_key, max_age_seconds=self.cache_max_age_seconds)
         if points_data is None:
-            points_data = self.http.get_json(f"/points/{city.latitude:.4f},{city.longitude:.4f}")
+            points_endpoint = f"/points/{city.latitude:.4f},{city.longitude:.4f}"
+            try:
+                points_data = self.http.get_json(points_endpoint)
+            except Exception as exc:
+                log_external_api_failure(
+                    provider="nws",
+                    action="fetch_points",
+                    endpoint=points_endpoint,
+                    details={
+                        "city": city.city_id,
+                        "date": target_date.isoformat(),
+                        "kind": kind,
+                    },
+                    error=exc,
+                )
+                raise WeatherProviderError(f"NWS points request failed: {exc}") from exc
             self.cache.set(point_key, points_data)
 
         try:
@@ -301,7 +351,21 @@ class NWSForecastClient:
         forecast_key = {"provider": "nws", "url": forecast_url}
         forecast_data = self.cache.get(forecast_key, max_age_seconds=self.cache_max_age_seconds)
         if forecast_data is None:
-            forecast_data = self.http.get_json(forecast_url)
+            try:
+                forecast_data = self.http.get_json(forecast_url)
+            except Exception as exc:
+                log_external_api_failure(
+                    provider="nws",
+                    action="fetch_forecast",
+                    endpoint=str(forecast_url),
+                    details={
+                        "city": city.city_id,
+                        "date": target_date.isoformat(),
+                        "kind": kind,
+                    },
+                    error=exc,
+                )
+                raise WeatherProviderError(f"NWS forecast request failed: {exc}") from exc
             self.cache.set(forecast_key, forecast_data)
 
         value = self._extract_temperature(forecast_data, target_date=target_date, kind=kind)
@@ -374,21 +438,38 @@ class WeatherEnsembleProvider:
             model for model in selected_models if model.strip().lower() != "nws"
         )
         points: list[ForecastPoint] = []
+        warnings: list[str] = []
         if open_meteo_models:
-            points.extend(
-                self.open_meteo.fetch_points(
-                    city,
-                    target_date=target_date,
-                    kind=kind,
-                    models=open_meteo_models,
+            try:
+                points.extend(
+                    self.open_meteo.fetch_points(
+                        city,
+                        target_date=target_date,
+                        kind=kind,
+                        models=open_meteo_models,
+                    )
                 )
-            )
+                warnings.extend(self.open_meteo.last_errors)
+            except WeatherProviderError as exc:
+                warnings.append(str(exc))
+                log_sync_event(
+                    source="polymarket_weather",
+                    action="fetch_open_meteo",
+                    status="fail",
+                    details={
+                        "city": city.city_id,
+                        "date": target_date.isoformat(),
+                        "kind": kind,
+                        "models": list(open_meteo_models),
+                    },
+                    error=exc,
+                )
 
         if any(model.strip().lower() == "nws" for model in selected_models):
             try:
                 points.append(self.nws.fetch_point(city, target_date=target_date, kind=kind))
             except Exception as exc:
-                LOGGER.warning("NWS forecast failed", exc_info=exc)
+                warnings.append(f"nws: {exc}")
                 log_sync_event(
                     source="polymarket_weather",
                     action="fetch_nws",
@@ -398,7 +479,9 @@ class WeatherEnsembleProvider:
                 )
 
         if not points:
-            raise WeatherProviderError("No forecast points available from configured providers.")
+            raise WeatherProviderError(
+                "; ".join(warnings) or "No forecast points available from configured providers."
+            )
         log_sync_event(
             source="polymarket_weather",
             action="fetch_ensemble",
@@ -408,11 +491,15 @@ class WeatherEnsembleProvider:
                 "date": target_date.isoformat(),
                 "kind": kind,
             },
-            result={"models": [point.source_model for point in points]},
+            result={
+                "models": [point.source_model for point in points],
+                "warnings": warnings,
+            },
         )
         return EnsembleForecast(
             city=city,
             target_date=target_date,
             kind=kind,
             points=tuple(points),
+            provider_warnings=tuple(warnings),
         )
