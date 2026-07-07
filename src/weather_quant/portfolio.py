@@ -418,7 +418,7 @@ def generate_passive_exit_plan(
     ladder: list[ExitLadderLeg] = []
     sold_shares = 0.0
     for index, (fraction, raw_price) in enumerate(
-        zip(normalized_fractions, price_levels, strict=False),
+        zip(normalized_fractions, price_levels),
         start=1,
     ):
         scaled_fraction = fraction * scale

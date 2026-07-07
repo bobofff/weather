@@ -63,7 +63,7 @@ def aggregate_member_daily_value(
     unit: TemperatureUnit,
 ) -> EnsembleMemberDailyValue | None:
     paired_values: list[tuple[str, float | None]] = []
-    for timestamp, value in zip(member.hourly_times, member.hourly_values, strict=False):
+    for timestamp, value in zip(member.hourly_times, member.hourly_values):
         if _date_in_timezone(timestamp, timezone_name) == target_date:
             paired_values.append((timestamp, value))
     numeric_values = [float(value) for _timestamp, value in paired_values if value is not None]

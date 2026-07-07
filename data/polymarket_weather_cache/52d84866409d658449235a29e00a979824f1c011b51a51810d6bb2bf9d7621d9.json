@@ -4,7 +4,7 @@
       25.7
     ],
     "temperature_2m_min": [
-      12.4
+      13.8
     ],
     "time": [
       "2026-07-07"
@@ -16,7 +16,7 @@
     "time": "iso8601"
   },
   "elevation": 952.0,
-  "generationtime_ms": 0.039458274841308594,
+  "generationtime_ms": 0.038623809814453125,
   "latitude": 40.125,
   "longitude": 33.046875,
   "timezone": "Europe/Istanbul",

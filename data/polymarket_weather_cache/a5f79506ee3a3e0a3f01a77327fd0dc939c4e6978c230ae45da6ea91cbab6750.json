@@ -1,7 +1,7 @@
 {
   "daily": {
     "temperature_2m_max": [
-      28.8
+      28.7
     ],
     "temperature_2m_min": [
       17.1
@@ -16,7 +16,7 @@
     "time": "iso8601"
   },
   "elevation": 952.0,
-  "generationtime_ms": 0.040411949157714844,
+  "generationtime_ms": 0.026106834411621094,
   "latitude": 40.1,
   "longitude": 33.0,
   "timezone": "Europe/Istanbul",

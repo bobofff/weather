@@ -188,6 +188,23 @@ class PaperTradingTest(unittest.TestCase):
         self.assertAlmostEqual(portfolio["summary"]["cash"], 80)
         self.assertEqual(portfolio["positions"][0]["status"], "OPEN")
 
+    def test_default_paper_buy_uses_kelly_sizing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = WeatherStorage(Path(tmpdir) / "weather.db", initialize=True)
+            result = storage.execute_paper_buy(
+                signal=signal(),
+                market_buckets=(market_bucket(0),),
+                context=context(),
+                initial_cash=1_000,
+                fee_rate=0.0,
+            )
+
+        self.assertTrue(result["summary"]["accepted"])
+        self.assertEqual(result["preview"]["sizingMethod"], "kelly")
+        self.assertAlmostEqual(result["preview"]["stakeUsdc"], 25)
+        self.assertAlmostEqual(result["preview"]["kellySizing"]["fullKellyFraction"], 0.625)
+        self.assertAlmostEqual(result["preview"]["filledShares"], 125)
+
     def test_rejects_insufficient_balance(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = WeatherStorage(Path(tmpdir) / "weather.db", initialize=True)

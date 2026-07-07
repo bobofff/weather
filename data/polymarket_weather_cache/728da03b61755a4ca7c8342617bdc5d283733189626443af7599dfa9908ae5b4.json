@@ -1,10 +1,10 @@
 {
   "daily": {
     "temperature_2m_max": [
-      28.1
+      28.0
     ],
     "temperature_2m_min": [
-      14.7
+      14.6
     ],
     "time": [
       "2026-07-08"
@@ -16,7 +16,7 @@
     "time": "iso8601"
   },
   "elevation": 952.0,
-  "generationtime_ms": 0.03933906555175781,
+  "generationtime_ms": 0.03540515899658203,
   "latitude": 40.123657,
   "longitude": 33.046875,
   "timezone": "Europe/Istanbul",

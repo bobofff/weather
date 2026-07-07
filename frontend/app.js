@@ -402,12 +402,12 @@ function bestPaperSignal() {
   return buySignals[0] || null;
 }
 
-function paperPayload(signal = bestPaperSignal()) {
+function paperPayload(signal = bestPaperSignal(), { includeDefaultStake = false } = {}) {
   const city = selectedCityRecord();
   const latest = latestEnsembleSignalResult || {};
   const targetProfitInput = $("paperTargetProfit") || $("targetProfit");
   const minCashoutInput = $("paperMinCashoutRatio") || $("minCashoutRatio");
-  return {
+  const payload = {
     city: $("citySelect").value,
     ...customLocationPayload(),
     unit: city?.settlementUnit || $("unit").value,
@@ -419,7 +419,6 @@ function paperPayload(signal = bestPaperSignal()) {
     marketsCsv: $("marketsCsv").value,
     includeOrderbooks: $("includeOrderbooks").checked,
     initialCash: Number($("paperInitialCash").value),
-    stakeUsdc: Number($("paperStake").value),
     minEdge: Number($("minEdge").value),
     feeRate: Number($("feeRate").value),
     maxSpread: Number($("paperMaxSpread").value),
@@ -435,6 +434,11 @@ function paperPayload(signal = bestPaperSignal()) {
     signal,
     marketBuckets: latest.marketBuckets || [],
   };
+  const stakeText = $("paperStake").value.trim();
+  if (stakeText || includeDefaultStake) {
+    payload.stakeUsdc = Number(stakeText || 25);
+  }
+  return payload;
 }
 
 function paperMarkPayload() {
@@ -488,6 +492,8 @@ function renderPaperPreview(preview) {
     metric("入场 VWAP", price(preview.vwap ?? preview.executableEntryCost)),
     metric("Fee", money(preview.fee)),
     metric("Shares", money(preview.filledShares)),
+    metric("定仓", preview.sizingMethod === "kelly" ? "Kelly" : "手动"),
+    metric("Kelly stake", money(preview.kellySizing?.stake)),
     metric("Edge", signedPct(preview.edge)),
     metric("Net cost", money(preview.netCost)),
     metric("Spread", price(preview.spread)),
@@ -1395,7 +1401,7 @@ async function previewPaperHedge() {
     const response = await fetch(`${API_BASE}/api/paper/hedge-preview`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(paperPayload(signal)),
+      body: JSON.stringify(paperPayload(signal, { includeDefaultStake: true })),
     });
     const result = await readJsonResponse(response, "Hedge preview 失败");
     renderPaperHedgePreview(result);

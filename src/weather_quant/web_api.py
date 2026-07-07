@@ -1104,6 +1104,11 @@ def _paper_stake(payload: dict[str, Any]) -> float:
     return float(DEFAULT_STAKE_USDC if raw is None else raw)
 
 
+def _paper_optional_stake(payload: dict[str, Any]) -> float | None:
+    raw = _payload_raw(payload, "stakeUsdc", "stake")
+    return None if raw is None else float(raw)
+
+
 def _paper_number(payload: dict[str, Any], default: float, *keys: str) -> float:
     raw = _payload_raw(payload, *keys)
     return float(default if raw is None else raw)
@@ -1240,7 +1245,7 @@ def paper_preview_payload(payload: dict[str, Any]) -> dict[str, Any]:
         context=context,
         account_key=account_key,
         initial_cash=_paper_initial_cash(payload),
-        stake_usdc=_paper_stake(payload),
+        stake_usdc=_paper_optional_stake(payload),
         min_edge=_paper_number(payload, DEFAULT_MIN_EDGE, "minEdge"),
         fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
         max_spread=_paper_number(payload, DEFAULT_MAX_SPREAD, "maxSpread"),
@@ -1271,7 +1276,7 @@ def paper_buy_payload(payload: dict[str, Any]) -> dict[str, Any]:
         context=context,
         account_key=account_key,
         initial_cash=_paper_initial_cash(payload),
-        stake_usdc=_paper_stake(payload),
+        stake_usdc=_paper_optional_stake(payload),
         min_edge=_paper_number(payload, DEFAULT_MIN_EDGE, "minEdge"),
         fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
         max_spread=_paper_number(payload, DEFAULT_MAX_SPREAD, "maxSpread"),

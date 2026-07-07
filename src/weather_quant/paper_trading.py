@@ -8,6 +8,7 @@ from typing import Any
 from weather_quant.buckets import parse_temperature_bucket
 from weather_quant.ensemble import stable_payload_hash
 from weather_quant.models import (
+    BucketSignal,
     DEFAULT_TAKER_FEE_RATE,
     FillEstimate,
     HedgeLeg,
@@ -26,6 +27,7 @@ from weather_quant.portfolio import (
     market_best_bid,
     market_mark_price,
 )
+from weather_quant.risk import PositionSizer, RiskConfig
 
 
 DEFAULT_ACCOUNT_KEY = "default"
@@ -234,7 +236,7 @@ def paper_buy_preview(
     account: Mapping[str, Any],
     open_positions: Sequence[Mapping[str, Any]] = (),
     context: Mapping[str, Any] | None = None,
-    stake_usdc: float = DEFAULT_STAKE_USDC,
+    stake_usdc: float | None = None,
     min_edge: float = DEFAULT_MIN_EDGE,
     fee_rate: float = DEFAULT_TAKER_FEE_RATE,
     max_spread: float = DEFAULT_MAX_SPREAD,
@@ -245,7 +247,8 @@ def paper_buy_preview(
     ctx = dict(context or {})
     account_key = str(account.get("account_key") or account.get("accountKey") or DEFAULT_ACCOUNT_KEY)
     cash_balance = safe_float(first_present(account.get("cash_balance"), account.get("cashBalance")), DEFAULT_INITIAL_CASH)
-    stake = max(0.0, float(stake_usdc))
+    manual_stake = stake_usdc is not None
+    stake = max(0.0, float(stake_usdc if stake_usdc is not None else DEFAULT_STAKE_USDC))
     recommendation = str(signal.get("recommendation") or "")
     probability = clamp_probability(optional_float(first_present(signal.get("ensembleProbability"), signal.get("ensemble_probability"))))
     expected_exit_cost = safe_float(
@@ -278,6 +281,35 @@ def paper_buy_preview(
     if orderbook is None or orderbook.best_ask is None or not orderbook.asks:
         return {**base, "accepted": False, "status": "REJECTED", "rejectReason": "NO_ASK"}
 
+    kelly_sizing = None
+    if not manual_stake:
+        exposure_before = exposure_after_buy(
+            open_positions=open_positions,
+            preview={**base, "netCost": 0.0},
+        )
+        kelly_sizing = kelly_stake_for_signal(
+            signal=signal,
+            market_bucket=market_bucket,
+            cash_balance=cash_balance,
+            current_market_exposure=exposure_before["sameMarketCostBefore"],
+            current_city_exposure=exposure_before["cityDateCostBefore"],
+            min_edge=min_edge,
+            fee_rate=fee_rate,
+            max_market_exposure=max_market_exposure,
+            max_city_date_exposure=max_city_date_exposure,
+        )
+        if not kelly_sizing["shouldTrade"]:
+            return {
+                **base,
+                "sizingMethod": "kelly",
+                "kellySizing": kelly_sizing,
+                "accepted": False,
+                "status": "REJECTED",
+                "rejectReason": "KELLY_NO_SIZE",
+            }
+        stake = safe_float(kelly_sizing["stake"])
+        base = {**base, "stakeUsdc": stake}
+
     fill = orderbook.estimate_market_buy(stake, fee_rate=fee_rate)
     fee_per_share = fill.fee / fill.filled_shares if fill.filled_shares > 0 else 0.0
     entry_cost = fill.vwap
@@ -303,6 +335,8 @@ def paper_buy_preview(
         "notional": fill.notional,
         "askDepth": ask_depth,
         "fill": fill_to_payload(fill),
+        "sizingMethod": "manual" if manual_stake else "kelly",
+        "kellySizing": kelly_sizing,
     }
 
     if edge < min_edge:
@@ -472,6 +506,83 @@ def exposure_after_buy(
         "cityDateCostBefore": city_date,
         "cityDateCostAfter": city_date + add_cost,
     }
+
+
+def kelly_stake_for_signal(
+    *,
+    signal: Mapping[str, Any],
+    market_bucket: MarketBucket,
+    cash_balance: float,
+    current_market_exposure: float,
+    current_city_exposure: float,
+    min_edge: float,
+    fee_rate: float,
+    max_market_exposure: float,
+    max_city_date_exposure: float,
+) -> dict[str, Any]:
+    probability = clamp_probability(
+        optional_float(first_present(signal.get("ensembleProbability"), signal.get("ensemble_probability")))
+    )
+    market_price = market_mark_price(market_bucket)
+    entry_cost = market_best_ask(market_bucket) or market_price or market_bucket.price
+    expected_exit_cost = safe_float(
+        first_present(signal.get("expectedExitCost"), signal.get("expected_exit_cost")),
+        0.0,
+    )
+    fee_per_share = binary_contract_fee(shares=1.0, price=entry_cost, fee_rate=fee_rate)
+    executable_edge = probability - entry_cost - fee_per_share - expected_exit_cost
+    raw_edge = probability - market_price if market_price is not None else None
+    bucket_signal = BucketSignal(
+        market_bucket=market_bucket,
+        probability=probability,
+        market_price=entry_cost,
+        edge=executable_edge,
+        expected_value=executable_edge,
+        fair_price=probability,
+        recommendation=str(signal.get("recommendation") or ""),
+        raw_edge=raw_edge,
+        executable_edge=executable_edge,
+        executable_entry_cost=entry_cost,
+        expected_exit_cost=expected_exit_cost,
+        entry_fee_cost=fee_per_share,
+    )
+    bankroll = max(0.0, cash_balance)
+    risk = RiskConfig(
+        bankroll=bankroll,
+        min_edge=min_edge,
+        fee_rate=fee_rate,
+        max_market_fraction=_fraction_cap(max_market_exposure, bankroll),
+        max_city_fraction=_fraction_cap(max_city_date_exposure, bankroll),
+        max_daily_fraction=_fraction_cap(max_city_date_exposure, bankroll),
+    )
+    recommendation = PositionSizer().size_yes(
+        bucket_signal,
+        risk,
+        current_market_exposure=current_market_exposure,
+        current_city_exposure=current_city_exposure,
+        current_daily_exposure=current_city_exposure,
+    )
+    return {
+        "shouldTrade": recommendation.should_trade,
+        "reason": recommendation.reason,
+        "stake": recommendation.stake,
+        "shares": recommendation.shares,
+        "fullKellyFraction": recommendation.full_kelly_fraction,
+        "scaledKellyFraction": recommendation.scaled_kelly_fraction,
+        "cappedFraction": recommendation.capped_fraction,
+        "maxLoss": recommendation.max_loss,
+        "potentialProfit": recommendation.potential_profit,
+        "depthBasedStakeCap": recommendation.depth_based_stake_cap,
+        "cashoutRatio": recommendation.cashout_ratio,
+        "entryFill": fill_to_payload(recommendation.entry_fill) if recommendation.entry_fill else None,
+        "exitFill": fill_to_payload(recommendation.exit_fill) if recommendation.exit_fill else None,
+    }
+
+
+def _fraction_cap(absolute_cap: float, bankroll: float) -> float:
+    if bankroll <= 0:
+        return 0.0
+    return max(0.0, absolute_cap) / bankroll
 
 
 def fill_to_payload(fill: FillEstimate) -> dict[str, Any]:

@@ -20,6 +20,15 @@ class ProbabilityError(RuntimeError):
     """Raised when a forecast distribution cannot be computed."""
 
 
+def _zip_strict(
+    left: Sequence[float],
+    right: Sequence[float],
+) -> zip:
+    if len(left) != len(right):
+        raise ProbabilityError("Expected sequences with equal length.")
+    return zip(left, right)
+
+
 def _normal_cdf(value: float, *, mean: float, std: float) -> float:
     if math.isinf(value):
         return 0.0 if value < 0 else 1.0
@@ -31,7 +40,7 @@ def _weighted_mean(values: Sequence[float], weights: Sequence[float]) -> float:
     total_weight = sum(weights)
     if total_weight <= 0:
         raise ProbabilityError("Model weights must sum to a positive value.")
-    return sum(value * weight for value, weight in zip(values, weights, strict=True)) / total_weight
+    return sum(value * weight for value, weight in _zip_strict(values, weights)) / total_weight
 
 
 def _weighted_variance(
@@ -42,7 +51,7 @@ def _weighted_variance(
     total_weight = sum(weights)
     if total_weight <= 0:
         return 0.0
-    return sum(weight * (value - mean) ** 2 for value, weight in zip(values, weights, strict=True)) / total_weight
+    return sum(weight * (value - mean) ** 2 for value, weight in _zip_strict(values, weights)) / total_weight
 
 
 def _weights_for_points(
@@ -113,7 +122,7 @@ class TemperatureProbabilityModel:
 
         probabilities = tuple(
             BucketProbability(bucket=bucket, probability=probability)
-            for bucket, probability in zip(buckets, raw_probabilities, strict=True)
+            for bucket, probability in _zip_strict(buckets, raw_probabilities)
         )
         return ForecastDistribution(
             mean=mean,
