@@ -19,20 +19,13 @@
         <nav class="side-menu">
           <a class="active" href="#market-panel">盘口配置</a>
           <a href="/cities.html">城市配置</a>
-          <a href="#forecast-panel">天气模型</a>
           <a href="#ensemble-panel">Ensemble</a>
           <a href="#signal-panel">信号评分</a>
           <a href="#paper-panel">虚拟盘</a>
           <a href="#llm-panel">AI 解读</a>
           <a href="#history-panel">历史记录</a>
           <a href="#weather-market-panel">天气盘口</a>
-          <a href="#portfolio-panel">持仓输入</a>
           <a href="#risk-panel">风控参数</a>
-          <a href="#summary">组合摘要</a>
-          <a href="#valuation-panel">持仓估值</a>
-          <a href="#exit-panel">退出计划</a>
-          <a href="#hedge-panel">Hedge legs</a>
-          <a href="#scenario-panel">情景矩阵</a>
         </nav>
       </aside>
 
@@ -42,7 +35,6 @@
           <h1>Polymarket 天气组合锁利</h1>
           <p>多桶 YES 持仓、可清算价值、分批退出和核心区间 hedge lock。</p>
         </div>
-        <button id="runButton" type="button">评估组合</button>
       </header>
 
       <section id="market-panel" class="panel">
@@ -71,30 +63,15 @@
               <option value="low">最低温</option>
             </select>
           </label>
-          <label>模型
-            <select id="weatherModels" multiple size="5">
-              <option value="ecmwf_ifs025" selected>ECMWF IFS 0.25</option>
-              <option value="icon_seamless" selected>ICON Seamless</option>
-              <option value="meteofrance_seamless" selected>Meteo-France Seamless</option>
-              <option value="gfs_seamless">GFS Seamless</option>
-              <option value="ukmo_seamless">UKMO Seamless</option>
-            </select>
-          </label>
           <label class="checkbox-row">
             <input id="includeOrderbooks" type="checkbox" checked>
             CLOB 盘口
           </label>
-          <button id="fetchForecastButton" type="button">获取预报</button>
           <button id="fetchMarketButton" type="button">获取盘口</button>
         </div>
       </section>
 
       <section id="notice" class="notice" hidden></section>
-
-      <section id="forecast-panel" class="panel">
-        <h2>天气模型</h2>
-        <div id="forecast"></div>
-      </section>
 
       <section id="ensemble-panel" class="panel">
         <h2>Ensemble Probability</h2>
@@ -157,7 +134,7 @@
             <input id="paperInitialCash" type="number" min="0" step="10" value="1000">
           </label>
           <label>轮询间隔 ms
-            <input id="paperMonitorIntervalMs" type="number" min="1000" step="1000" value="60000">
+            <input id="paperMonitorIntervalMs" type="number" min="60000" step="60000" value="60000">
           </label>
           <label>锁利触发价差
             <input id="paperTargetProfit" type="number" step="0.01" value="0.10">
@@ -182,7 +159,6 @@
           <h2>AI 解读</h2>
           <div class="button-row">
             <button id="explainSignalButton" class="secondary" type="button" disabled>解读信号</button>
-            <button id="explainPortfolioButton" class="secondary" type="button" disabled>解读组合</button>
           </div>
         </div>
         <div id="llmSummary" class="llm-summary"></div>
@@ -210,17 +186,6 @@
         <div id="markets"></div>
       </section>
 
-      <section id="portfolio-panel" class="panel input-grid">
-        <label>
-          当前持仓 CSV
-          <textarea id="positionsCsv" rows="8"></textarea>
-        </label>
-        <label>
-          市场快照 CSV（可选）
-          <textarea id="marketsCsv" rows="8"></textarea>
-        </label>
-      </section>
-
       <section id="risk-panel" class="panel compact-grid">
         <label>单位
           <select id="unit">
@@ -233,28 +198,6 @@
         <label>目标锁利 <input id="targetProfit" type="number" step="0.01" value="0"></label>
         <label>核心概率阈值 <input id="tailProbabilityCutoff" type="number" min="0" max="1" step="0.001" value="0.05"></label>
         <label>最大尾部概率 <input id="maxTailProbability" type="number" min="0" max="1" step="0.001" value="0.10"></label>
-      </section>
-
-      <section id="summary" class="metrics"></section>
-
-      <section id="valuation-panel" class="panel">
-        <h2>持仓估值</h2>
-        <div id="valuations"></div>
-      </section>
-
-      <section id="exit-panel" class="panel">
-        <h2>分批被动退出</h2>
-        <div id="exits"></div>
-      </section>
-
-      <section id="hedge-panel" class="panel">
-        <h2>Hedge legs</h2>
-        <div id="hedgeLegs"></div>
-      </section>
-
-      <section id="scenario-panel" class="panel">
-        <h2>组合情景矩阵</h2>
-        <div id="scenarios"></div>
       </section>
       </main>
     </div>

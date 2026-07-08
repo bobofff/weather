@@ -1,21 +1,19 @@
 const $ = (id) => document.getElementById(id);
 const API_BASE = window.WEATHER_API_BASE || window.location.origin;
 const SELECTED_CITY_STORAGE_KEY = "weatherSelectedCityId";
+const PAPER_MONITOR_INTERVAL_MS = 60000;
+const PAPER_MONITOR_STATUS_MIN_MS = PAPER_MONITOR_INTERVAL_MS;
+const PAPER_MONITOR_STATUS_MAX_MS = PAPER_MONITOR_INTERVAL_MS;
 let cityRecords = [];
 let latestEnsembleSignalResult = null;
-let latestPortfolioResult = null;
 let latestPaperPortfolioResult = null;
 let latestPaperMonitorResult = null;
-
-const samplePositions = `outcome,shares,total_cost,price,best_bid,best_ask,probability
-84 to 85,100,32,0.50,0.46,0.54,0.34
-85 to 86,80,28,0.42,0.38,0.47,0.28`;
-
-const sampleMarkets = `outcome,price,best_bid,best_ask,probability
-83 to 84,0.20,0.16,0.24,0.08
-84 to 85,0.50,0.46,0.54,0.34
-85 to 86,0.42,0.38,0.47,0.28
-86 to 87,0.18,0.14,0.23,0.07`;
+let paperMonitorStatusTimer = null;
+let paperMonitorStatusTimerMs = null;
+let paperMonitorPortfolioRefreshKey = null;
+let paperMonitorHedgeRefreshKey = null;
+let paperHedgePreviewRunning = false;
+let paperHedgeNoticeKey = null;
 
 function money(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
@@ -131,6 +129,29 @@ function formatLocalTime(timezone) {
   }
 }
 
+function formatBeijingTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  try {
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date);
+    const part = (type) => parts.find((item) => item.type === type)?.value || "";
+    const milliseconds = String(date.getMilliseconds()).padStart(3, "0");
+    return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}:${part("second")}.${milliseconds} 北京时间`;
+  } catch {
+    return String(value);
+  }
+}
+
 function sourceName(value) {
   const source = String(value || "");
   if (source === "polymarket") return "Polymarket";
@@ -223,9 +244,7 @@ function showNotice(message, isError = false) {
 
 function syncLlmButtons() {
   const signalButton = $("explainSignalButton");
-  const portfolioButton = $("explainPortfolioButton");
   if (signalButton) signalButton.disabled = !latestEnsembleSignalResult;
-  if (portfolioButton) portfolioButton.disabled = !latestPortfolioResult;
   const hasSignals = Boolean(latestEnsembleSignalResult?.signals?.length);
   const previewButton = $("paperPreviewButton");
   const buyButton = $("paperBuyButton");
@@ -304,26 +323,6 @@ function customLocationPayload() {
   };
 }
 
-function payload() {
-  return {
-    positionsCsv: $("positionsCsv").value,
-    marketsCsv: $("marketsCsv").value,
-    marketSlug: $("marketSlug").value,
-    conditionId: $("conditionId").value,
-    city: marketCityValue(),
-    marketQuery: $("marketQuery").value,
-    targetDate: $("targetDate").value,
-    temperatureKind: $("temperatureKind").value,
-    includeOrderbooks: $("includeOrderbooks").checked,
-    unit: $("unit").value,
-    feeRate: Number($("feeRate").value),
-    minCashoutRatio: Number($("minCashoutRatio").value),
-    targetProfit: Number($("targetProfit").value),
-    tailProbabilityCutoff: Number($("tailProbabilityCutoff").value),
-    maxTailProbability: Number($("maxTailProbability").value),
-  };
-}
-
 function marketPayload() {
   const city = selectedCityRecord();
   return {
@@ -339,23 +338,6 @@ function marketPayload() {
   };
 }
 
-function selectedWeatherModels() {
-  const models = Array.from($("weatherModels").selectedOptions).map((option) => option.value);
-  return models.length ? models : ["ecmwf_ifs025", "icon_seamless", "meteofrance_seamless"];
-}
-
-function forecastPayload() {
-  const city = selectedCityRecord();
-  return {
-    city: $("citySelect").value,
-    ...customLocationPayload(),
-    unit: city?.settlementUnit || $("unit").value,
-    targetDate: $("targetDate").value,
-    temperatureKind: $("temperatureKind").value,
-    models: selectedWeatherModels(),
-  };
-}
-
 function ensemblePayload(includeMarketBuckets = false) {
   const city = selectedCityRecord();
   return {
@@ -368,7 +350,6 @@ function ensemblePayload(includeMarketBuckets = false) {
     marketSlug: $("marketSlug").value,
     conditionId: $("conditionId").value,
     marketQuery: $("marketQuery").value,
-    marketsCsv: $("marketsCsv").value,
     includeOrderbooks: $("includeOrderbooks").checked,
     includeMarketBuckets,
     feeRate: Number($("feeRate").value),
@@ -416,7 +397,6 @@ function paperPayload(signal = bestPaperSignal(), { includeDefaultStake = false 
     marketSlug: $("marketSlug").value,
     conditionId: $("conditionId").value,
     marketQuery: $("marketQuery").value,
-    marketsCsv: $("marketsCsv").value,
     includeOrderbooks: $("includeOrderbooks").checked,
     initialCash: Number($("paperInitialCash").value),
     minEdge: Number($("minEdge").value),
@@ -518,23 +498,35 @@ function renderPaperHedgePreview(result) {
     metric("主桶", adjacent.mainOutcome || "-"),
     metric("邻桶", adjacent.adjacentOutcome || "-"),
     metric("邻桶概率", pct(adjacent.adjacentProbability)),
+    metric("相邻桶成本", money(adjacent.hedgeCost)),
+    metric("Worst 改善", money(adjacent.riskReduction)),
     metric("Covered probability", pct(summary.coveredProbability)),
     metric("Tail risk", pct(summary.uncoveredTailProbability)),
     metric("Covered worst PnL", money(summary.coveredWorstCasePnl)),
     metric("Global worst PnL", money(summary.globalWorstCasePnl)),
+    metric("Tail hedge cost", money(tail.hedgeCost)),
     metric("Tail lock", summary.isTailRiskLock ? "是" : "否", summary.isTailRiskLock ? "good" : "watch"),
     metric("真套利", summary.isTrueArbitrage ? "是" : "否"),
   ].join("");
-  const hedgeRows = (tail.hedgeLegs || []).map((row) => `<tr>
+  const adjacentRows = adjacent.hedgeShares ? [`<tr>
+    <td>相邻桶</td>
+    <td>${escapeHtml(adjacent.adjacentOutcome || "-")}</td>
+    <td>${money(adjacent.hedgeShares)}</td>
+    <td>${price(adjacent.vwap)}</td>
+    <td>${money(adjacent.hedgeCost)}</td>
+  </tr>`] : [];
+  const tailRows = (tail.hedgeLegs || []).map((row) => `<tr>
+    <td>Tail lock</td>
     <td>${escapeHtml(row.outcome)}</td>
     <td>${money(row.shares)}</td>
     <td>${price(row.price)}</td>
     <td>${money(row.totalCost ?? row.cost)}</td>
   </tr>`);
+  const hedgeRows = [...adjacentRows, ...tailRows];
   target.innerHTML = `
     <h2>Hedge Preview</h2>
     <div class="metrics paper-metrics">${metrics}</div>
-    ${table(["温度桶", "份额", "价格", "成本"], hedgeRows)}
+    ${table(["类型", "温度桶", "份额", "价格", "成本"], hedgeRows)}
   `;
 }
 
@@ -554,7 +546,7 @@ function renderPaperPortfolio(result) {
   ].join("");
   $("paperSummary").innerHTML = `<div class="metrics paper-metrics">${summaryMetrics}</div>`;
   const orderRows = (portfolio.orders || []).map((row) => `<tr>
-    <td>${escapeHtml(row.createdAt || "-")}</td>
+    <td>${escapeHtml(formatBeijingTime(row.createdAt))}</td>
     <td>${escapeHtml(compactBucketLabel(row.bucketLabel || row.outcome, row.bucketKey))}</td>
     <td>${money(row.stakeUsdc)}</td>
     <td>${money(row.filledShares)}</td>
@@ -586,7 +578,7 @@ function renderPaperMarks(marks) {
   const target = $("paperMarks");
   if (!target) return;
   const rows = (marks || []).map((row) => `<tr>
-    <td>${escapeHtml(row.fetchedAt || "-")}</td>
+    <td>${escapeHtml(formatBeijingTime(row.fetchedAt))}</td>
     <td>${escapeHtml(compactBucketLabel(row.bucketLabel || row.outcome, row.bucketKey))}</td>
     <td>${price(row.bestBid)}</td>
     <td>${price(row.bestAsk)}</td>
@@ -612,13 +604,132 @@ function renderPaperMonitorStatus(result) {
     metric("执行中", monitor.running ? "是" : "否", monitor.running ? "watch" : ""),
     metric("间隔", `${monitor.intervalMs || "-"} ms`),
     metric("Tick", String(monitor.tickCount ?? 0)),
-    metric("上次 mark", monitor.lastFinishedAt || "-"),
+    metric("上次 mark", formatBeijingTime(monitor.lastFinishedAt)),
     metric("上次持仓", String(lastSummary.openPositionCount ?? "-")),
     metric("上次快照", String(lastSummary.markCount ?? "-")),
+    metric("跳过", String(monitor.skippedCount ?? 0)),
     metric("连续错误", String(monitor.consecutiveErrors ?? 0), Number(monitor.consecutiveErrors) > 0 ? "bad" : ""),
   ].join("");
   const errorHtml = monitor.lastError ? `<p class="notice error">最近错误：${escapeHtml(monitor.lastError)}</p>` : "";
   target.innerHTML = `<div class="metrics paper-metrics paper-monitor-metrics">${metrics}</div>${errorHtml}`;
+}
+
+function paperMonitorStatusIntervalMs(monitor) {
+  const intervalMs = Number(monitor?.intervalMs || $("paperMonitorIntervalMs")?.value || PAPER_MONITOR_INTERVAL_MS);
+  const bounded = Number.isFinite(intervalMs) ? intervalMs : PAPER_MONITOR_INTERVAL_MS;
+  return Math.max(PAPER_MONITOR_STATUS_MIN_MS, Math.min(PAPER_MONITOR_STATUS_MAX_MS, bounded));
+}
+
+function paperMonitorRefreshKey(monitor) {
+  if (!monitor?.lastFinishedAt) return null;
+  return `${monitor.tickCount ?? ""}:${monitor.lastFinishedAt}`;
+}
+
+async function maybeRefreshPaperPortfolioFromMonitor(monitor) {
+  const refreshKey = paperMonitorRefreshKey(monitor);
+  if (!refreshKey || refreshKey === paperMonitorPortfolioRefreshKey) return;
+  paperMonitorPortfolioRefreshKey = refreshKey;
+  await loadPaperPortfolio();
+  await maybeRefreshPaperHedgeFromMonitor(monitor);
+}
+
+function paperHedgeNotice(result) {
+  const adjacent = result?.adjacent || {};
+  const tail = result?.tailRiskLock || {};
+  if (adjacent.recommendation === "HEDGE_ADJACENT") {
+    return {
+      key: [
+        "adjacent",
+        adjacent.mainOutcome || "",
+        adjacent.adjacentOutcome || "",
+        Number(adjacent.hedgeShares || 0).toFixed(2),
+        Number(adjacent.hedgeCost || 0).toFixed(2),
+      ].join(":"),
+      message: `轮询发现相邻桶对冲建议：${compactBucketLabel(adjacent.adjacentOutcome)}，成本 ${money(adjacent.hedgeCost)}，Worst-case 改善 ${money(adjacent.riskReduction)}。`,
+    };
+  }
+  if (tail.isTailRiskLock && (tail.hedgeLegs || []).length) {
+    const firstLeg = tail.hedgeLegs[0] || {};
+    return {
+      key: [
+        "tail",
+        firstLeg.outcome || "",
+        Number(tail.hedgeCost || 0).toFixed(2),
+        Number(tail.coveredWorstCasePnl || 0).toFixed(2),
+      ].join(":"),
+      message: `轮询发现 Tail-risk lock 方案：覆盖概率 ${pct(tail.coveredProbability)}，成本 ${money(tail.hedgeCost)}，核心最差 PnL ${money(tail.coveredWorstCasePnl)}。`,
+    };
+  }
+  return null;
+}
+
+async function fetchPaperHedgePreview({ notify = false, refreshKey = null } = {}) {
+  const signal = bestPaperSignal();
+  if (!signal || paperHedgePreviewRunning) return null;
+  paperHedgePreviewRunning = true;
+  try {
+    const response = await fetch(`${API_BASE}/api/paper/hedge-preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(paperPayload(signal, { includeDefaultStake: true })),
+    });
+    const result = await readJsonResponse(response, "Hedge preview 失败");
+    renderPaperHedgePreview(result);
+    if (refreshKey) {
+      paperMonitorHedgeRefreshKey = refreshKey;
+    }
+    if (notify) {
+      const notice = paperHedgeNotice(result);
+      if (notice && notice.key !== paperHedgeNoticeKey) {
+        paperHedgeNoticeKey = notice.key;
+        showNotice(notice.message);
+      }
+    }
+    return result;
+  } finally {
+    paperHedgePreviewRunning = false;
+    syncLlmButtons();
+  }
+}
+
+async function maybeRefreshPaperHedgeFromMonitor(monitor) {
+  const refreshKey = paperMonitorRefreshKey(monitor);
+  const openPositionCount = Number(monitor?.lastResult?.summary?.openPositionCount ?? latestPaperPortfolioResult?.summary?.openPositionCount ?? 0);
+  if (
+    !refreshKey
+    || refreshKey === paperMonitorHedgeRefreshKey
+    || openPositionCount <= 0
+    || !latestEnsembleSignalResult?.signals?.length
+  ) {
+    return;
+  }
+  try {
+    await fetchPaperHedgePreview({ notify: true, refreshKey });
+  } catch {
+    paperMonitorHedgeRefreshKey = refreshKey;
+  }
+}
+
+function stopPaperMonitorStatusPolling() {
+  if (paperMonitorStatusTimer) {
+    clearInterval(paperMonitorStatusTimer);
+    paperMonitorStatusTimer = null;
+  }
+  paperMonitorStatusTimerMs = null;
+}
+
+function syncPaperMonitorStatusPolling(monitor = latestPaperMonitorResult) {
+  if (!monitor?.enabled) {
+    stopPaperMonitorStatusPolling();
+    return;
+  }
+  const intervalMs = paperMonitorStatusIntervalMs(monitor);
+  if (paperMonitorStatusTimer && paperMonitorStatusTimerMs === intervalMs) return;
+  stopPaperMonitorStatusPolling();
+  paperMonitorStatusTimerMs = intervalMs;
+  paperMonitorStatusTimer = setInterval(() => {
+    void loadPaperMonitorStatus({ refreshPortfolio: true });
+  }, intervalMs);
 }
 
 function levelText(levels) {
@@ -627,41 +738,6 @@ function levelText(levels) {
     .slice(0, 3)
     .map((level) => `${price(level.price)} x ${money(level.size)}`)
     .join(" / ");
-}
-
-function renderForecast(result) {
-  const summary = result.summary;
-  const metricHtml = [
-    metric("城市", summary.cityName || summary.cityId || "-"),
-    metric("坐标", `${price(summary.latitude)}, ${price(summary.longitude)}`),
-    metric("时区", summary.timezone || "-"),
-    metric("日期", summary.targetDate || "-"),
-    metric("当地时间", formatLocalTime(summary.timezone)),
-    metric("类型", kindName(summary.kind)),
-    metric("均值", temperature(summary.mean, summary.unit)),
-    metric("范围", `${temperature(summary.min, summary.unit)} / ${temperature(summary.max, summary.unit)}`),
-    metric("模型数", summary.modelCount ?? "-"),
-    metric("失败模型", summary.failedModelCount ?? 0, summary.failedModelCount ? "watch" : ""),
-  ].join("");
-  const rows = result.points.map((row) => `<tr>
-    <td>${escapeHtml(modelName(row.sourceModel))}</td>
-    <td>${temperature(row.value, row.unit)}</td>
-    <td>${escapeHtml(row.provider || "open-meteo")}</td>
-    <td>${escapeHtml(row.forecastGranularity || "-")}</td>
-    <td>${escapeHtml(row.settlementStation || "-")}</td>
-    <td>${escapeHtml(row.generatedAt || "-")}</td>
-  </tr>`);
-  $("forecast").innerHTML = `<div class="metrics">${metricHtml}</div>${table(
-    ["模型", "温度", "来源", "粒度", "结算站", "生成时间"],
-    rows,
-  )}`;
-  const warnings = Array.isArray(summary.warnings) ? summary.warnings : [];
-  showNotice(
-    warnings.length
-      ? `已获取 ${summary.modelCount} 个天气模型预报，${warnings.length} 个模型失败：${warnings.join("；")}`
-      : `已获取 ${summary.modelCount} 个天气模型预报。`,
-    false,
-  );
 }
 
 function probabilityChart(chart) {
@@ -942,92 +1018,6 @@ function renderMarkets(result) {
   showNotice(`已从 Polymarket 接口获取 ${summary.marketCount} 个天气盘口。`);
 }
 
-function render(result) {
-  const summary = result.summary;
-  $("summary").innerHTML = [
-    metric("盘口来源", sourceName(summary.marketSource)),
-    metric("市场桶数", summary.marketCount ?? "-"),
-    metric("当前成本", money(summary.currentCost)),
-    metric("Mark value", money(summary.markValue)),
-    metric("Liquidation", money(summary.liquidationValue)),
-    metric("Cashout ratio", pct(summary.cashoutRatio)),
-    metric("Hedge action", summary.recommendation),
-    metric("Covered probability", pct(summary.coveredProbability)),
-    metric("Tail risk", pct(summary.uncoveredTailProbability)),
-    metric("Worst-case PnL", money(summary.worstCasePnl)),
-    metric("Covered worst PnL", money(summary.coveredWorstCasePnl)),
-    metric("Hedge cost", money(summary.hedgeCost)),
-    metric("Ask sum", price(summary.askSum)),
-    metric("True arbitrage", summary.isTrueArbitrage ? "是" : "否"),
-  ].join("");
-
-  const valuationRows = result.valuations.map(
-    (row) => `<tr>
-      <td>${escapeHtml(row.outcome)}</td>
-      <td>${money(row.shares)}</td>
-      <td>${money(row.cost)}</td>
-      <td>${price(row.markPrice)}</td>
-      <td>${price(row.bestBid)}</td>
-      <td>${price(row.bestAsk)}</td>
-      <td>${money(row.markValue)}</td>
-      <td>${money(row.liquidationValue)}</td>
-      <td>${pct(row.cashoutRatio)}</td>
-      <td>${money(row.executablePnl)}</td>
-    </tr>`,
-  );
-  $("valuations").innerHTML = table(
-    ["温度桶", "份额", "成本", "mark", "bid", "ask", "Mark value", "Liquidation", "Cashout", "可执行 PnL"],
-    valuationRows,
-  );
-
-  const exitRows = result.exits.flatMap((plan) =>
-    plan.ladder.map(
-      (leg) => `<tr>
-        <td>${escapeHtml(plan.outcome)}</td>
-        <td><span class="badge">${escapeHtml(plan.action)}</span></td>
-        <td>${pct(leg.fraction)}</td>
-        <td>${money(leg.shares)}</td>
-        <td>${price(leg.limitPrice)}</td>
-        <td>${money(leg.netValue)}</td>
-        <td>${money(plan.retainedShares)}</td>
-      </tr>`,
-    ),
-  );
-  $("exits").innerHTML = table(
-    ["温度桶", "动作", "比例", "份额", "限价", "成交后净额", "保留到结算"],
-    exitRows,
-  );
-
-  const hedgeRows = result.hedgeLegs.map(
-    (row) => `<tr>
-      <td>${escapeHtml(row.outcome)}</td>
-      <td>${escapeHtml(row.action)}</td>
-      <td>${money(row.shares)}</td>
-      <td>${price(row.price)}</td>
-      <td>${money(row.cost)}</td>
-    </tr>`,
-  );
-  $("hedgeLegs").innerHTML = table(["温度桶", "动作", "买入份额", "ask", "成本含费"], hedgeRows);
-
-  const scenarioRows = result.scenarios.map(
-    (row) => `<tr>
-      <td>${escapeHtml(row.outcome)}</td>
-      <td>${pct(row.probability)}</td>
-      <td>${money(row.payoff)}</td>
-      <td>${money(row.totalCost)}</td>
-      <td>${money(row.netPnl)}</td>
-      <td><span class="badge ${row.isCovered ? "" : "warn"}">${row.isCovered ? "核心覆盖" : "尾部风险"}</span></td>
-    </tr>`,
-  );
-  $("scenarios").innerHTML = table(
-    ["结算桶", "概率", "Payoff", "总成本", "净收益", "覆盖"],
-    scenarioRows,
-  );
-
-  const notes = summary.notes && summary.notes.length ? `说明：${summary.notes.join("；")}` : "";
-  showNotice(notes || "页面浮盈不是已实现收益，真实收益以成交净额和最终结算为准。");
-}
-
 async function readJsonResponse(response, fallbackMessage) {
   const text = await response.text();
   let result = {};
@@ -1081,25 +1071,6 @@ async function loadCities(selectedCityId = savedCityId() || $("citySelect").valu
     }
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
-  }
-}
-
-async function fetchForecast() {
-  const button = $("fetchForecastButton");
-  button.disabled = true;
-  showNotice("正在从 Open-Meteo 获取预报...");
-  try {
-    const response = await fetch(`${API_BASE}/api/forecast`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(forecastPayload()),
-    });
-    const result = await readJsonResponse(response, "获取预报失败");
-    renderForecast(result);
-  } catch (error) {
-    showNotice(error instanceof Error ? error.message : String(error), true);
-  } finally {
-    button.disabled = false;
   }
 }
 
@@ -1210,27 +1181,6 @@ async function reconcileSignals() {
   }
 }
 
-async function run() {
-  const button = $("runButton");
-  button.disabled = true;
-  showNotice("正在计算...");
-  try {
-    const response = await fetch(`${API_BASE}/api/portfolio`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload()),
-    });
-    const result = await readJsonResponse(response, "组合评估失败");
-    latestPortfolioResult = result;
-    syncLlmButtons();
-    render(result);
-  } catch (error) {
-    showNotice(error instanceof Error ? error.message : String(error), true);
-  } finally {
-    button.disabled = false;
-  }
-}
-
 async function loadPaperPortfolio() {
   try {
     const params = new URLSearchParams({
@@ -1245,18 +1195,23 @@ async function loadPaperPortfolio() {
   }
 }
 
-async function loadPaperMonitorStatus() {
+async function loadPaperMonitorStatus({ refreshPortfolio = false } = {}) {
   try {
     const response = await fetch(`${API_BASE}/api/paper/monitor/status`);
     const result = await readJsonResponse(response, "读取虚拟盘轮询状态失败");
     renderPaperMonitorStatus(result);
+    syncPaperMonitorStatusPolling(latestPaperMonitorResult);
+    if (refreshPortfolio) {
+      await maybeRefreshPaperPortfolioFromMonitor(latestPaperMonitorResult);
+    }
   } catch (error) {
     renderPaperMonitorStatus({
       enabled: false,
       running: false,
-      intervalMs: Number($("paperMonitorIntervalMs")?.value || 60000),
+      intervalMs: Number($("paperMonitorIntervalMs")?.value || PAPER_MONITOR_INTERVAL_MS),
       lastError: error instanceof Error ? error.message : String(error),
     });
+    stopPaperMonitorStatusPolling();
   }
 }
 
@@ -1272,6 +1227,8 @@ async function refreshPaperMarks() {
     });
     const result = await readJsonResponse(response, "刷新持仓盘口失败");
     renderPaperMonitorStatus(result);
+    syncPaperMonitorStatusPolling(latestPaperMonitorResult);
+    paperMonitorPortfolioRefreshKey = paperMonitorRefreshKey(latestPaperMonitorResult);
     renderPaperPortfolio(result.result || result);
     const summary = result.result?.summary || result.summary || {};
     if (summary.skippedReason === "NO_OPEN_POSITIONS") {
@@ -1279,6 +1236,7 @@ async function refreshPaperMarks() {
     } else {
       showNotice(`持仓盘口已刷新：${summary.markCount || 0} 个快照，${summary.warningCount || 0} 个警告。`);
     }
+    await maybeRefreshPaperHedgeFromMonitor(latestPaperMonitorResult);
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
   } finally {
@@ -1293,7 +1251,7 @@ async function startPaperMonitor() {
   try {
     const payload = {
       ...paperMarkPayload(),
-      intervalMs: Number($("paperMonitorIntervalMs").value || 60000),
+      intervalMs: Number($("paperMonitorIntervalMs").value || PAPER_MONITOR_INTERVAL_MS),
     };
     const response = await fetch(`${API_BASE}/api/paper/monitor/start`, {
       method: "POST",
@@ -1302,6 +1260,7 @@ async function startPaperMonitor() {
     });
     const result = await readJsonResponse(response, "启动虚拟盘轮询失败");
     renderPaperMonitorStatus(result);
+    syncPaperMonitorStatusPolling(latestPaperMonitorResult);
     showNotice("虚拟盘持仓轮询已启动。");
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
@@ -1322,6 +1281,7 @@ async function stopPaperMonitor() {
     });
     const result = await readJsonResponse(response, "停止虚拟盘轮询失败");
     renderPaperMonitorStatus(result);
+    stopPaperMonitorStatusPolling();
     showNotice("虚拟盘持仓轮询已停止。");
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
@@ -1398,17 +1358,12 @@ async function previewPaperHedge() {
   button.disabled = true;
   showNotice("正在计算 hedge preview...");
   try {
-    const response = await fetch(`${API_BASE}/api/paper/hedge-preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(paperPayload(signal, { includeDefaultStake: true })),
-    });
-    const result = await readJsonResponse(response, "Hedge preview 失败");
-    renderPaperHedgePreview(result);
+    await fetchPaperHedgePreview();
     showNotice("Hedge preview 已更新。");
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
   } finally {
+    button.disabled = false;
     syncLlmButtons();
   }
 }
@@ -1438,11 +1393,11 @@ async function reconcilePaper() {
   }
 }
 
-async function explainResult(kind) {
-  const result = kind === "ensemble-signal" ? latestEnsembleSignalResult : latestPortfolioResult;
-  const button = kind === "ensemble-signal" ? $("explainSignalButton") : $("explainPortfolioButton");
+async function explainResult() {
+  const result = latestEnsembleSignalResult;
+  const button = $("explainSignalButton");
   if (!result) {
-    showNotice(kind === "ensemble-signal" ? "请先运行 Ensemble Signal。" : "请先评估组合。", true);
+    showNotice("请先运行 Ensemble Signal。", true);
     return;
   }
   button.disabled = true;
@@ -1451,7 +1406,7 @@ async function explainResult(kind) {
     const response = await fetch(`${API_BASE}/api/llm-summary`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, result }),
+      body: JSON.stringify({ kind: "ensemble-signal", result }),
     });
     const payload = await readJsonResponse(response, "生成 AI 解读失败");
     showLlmSummary(payload.summary || "-");
@@ -1464,26 +1419,21 @@ async function explainResult(kind) {
 }
 
 async function init() {
-  $("positionsCsv").placeholder = samplePositions;
-  $("marketsCsv").placeholder = sampleMarkets;
   $("targetDate").value = todayLocalISO();
-  $("citySelect").addEventListener("change", syncUnitFromCity);
-  $("fetchForecastButton").addEventListener("click", fetchForecast);
-  $("fetchEnsembleButton").addEventListener("click", () => fetchEnsemble("ensemble"));
-  $("fetchEnsembleSignalButton").addEventListener("click", () => fetchEnsemble("ensemble-signal"));
-  $("fetchMarketButton").addEventListener("click", fetchMarkets);
-  $("runButton").addEventListener("click", run);
-  $("importSettlementButton").addEventListener("click", importSettlement);
-  $("reconcileSignalsButton").addEventListener("click", reconcileSignals);
-  $("paperPreviewButton").addEventListener("click", previewPaperBuy);
-  $("paperBuyButton").addEventListener("click", executePaperBuy);
-  $("paperMarkButton").addEventListener("click", refreshPaperMarks);
-  $("paperMonitorStartButton").addEventListener("click", startPaperMonitor);
-  $("paperMonitorStopButton").addEventListener("click", stopPaperMonitor);
-  $("paperHedgePreviewButton").addEventListener("click", previewPaperHedge);
-  $("paperReconcileButton").addEventListener("click", reconcilePaper);
-  $("explainSignalButton").addEventListener("click", () => explainResult("ensemble-signal"));
-  $("explainPortfolioButton").addEventListener("click", () => explainResult("portfolio"));
+  $("citySelect")?.addEventListener("change", syncUnitFromCity);
+  $("fetchEnsembleButton")?.addEventListener("click", () => fetchEnsemble("ensemble"));
+  $("fetchEnsembleSignalButton")?.addEventListener("click", () => fetchEnsemble("ensemble-signal"));
+  $("fetchMarketButton")?.addEventListener("click", fetchMarkets);
+  $("importSettlementButton")?.addEventListener("click", importSettlement);
+  $("reconcileSignalsButton")?.addEventListener("click", reconcileSignals);
+  $("paperPreviewButton")?.addEventListener("click", previewPaperBuy);
+  $("paperBuyButton")?.addEventListener("click", executePaperBuy);
+  $("paperMarkButton")?.addEventListener("click", refreshPaperMarks);
+  $("paperMonitorStartButton")?.addEventListener("click", startPaperMonitor);
+  $("paperMonitorStopButton")?.addEventListener("click", stopPaperMonitor);
+  $("paperHedgePreviewButton")?.addEventListener("click", previewPaperHedge);
+  $("paperReconcileButton")?.addEventListener("click", reconcilePaper);
+  $("explainSignalButton")?.addEventListener("click", explainResult);
   syncLlmButtons();
   await loadCities();
   await loadHistory();

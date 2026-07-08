@@ -21,6 +21,7 @@ const PAPER_MONITOR_DEFAULT_INTERVAL_MS = parsePositiveInteger(
   process.env.PAPER_MONITOR_INTERVAL_MS || "60000",
   "PAPER_MONITOR_INTERVAL_MS",
 );
+const PAPER_MONITOR_MIN_INTERVAL_MS = 60000;
 const PAPER_MONITOR_AUTO_START = String(process.env.PAPER_MONITOR_AUTO_START || "1") !== "0";
 
 function parsePort(value, name) {
@@ -251,11 +252,11 @@ async function runPaperMonitorOnce(reason = "interval", payloadOverrides = {}) {
   paperMonitor.running = true;
   paperMonitor.lastRunAt = new Date().toISOString();
   paperMonitor.tickCount += 1;
+  let result;
   try {
     const payload = paperMonitorPayload(payloadOverrides);
     const portfolio = await runWeatherApi("paper-portfolio", payload);
     const openPositionCount = Number(portfolio?.summary?.openPositionCount || 0);
-    let result;
     if (openPositionCount > 0) {
       result = await runWeatherApi("paper-mark", payload);
     } else {
@@ -277,7 +278,6 @@ async function runPaperMonitorOnce(reason = "interval", payloadOverrides = {}) {
     };
     paperMonitor.lastError = null;
     paperMonitor.consecutiveErrors = 0;
-    return { result, monitor: paperMonitorStatus() };
   } catch (error) {
     paperMonitor.lastError = errorMessage(error);
     paperMonitor.consecutiveErrors += 1;
@@ -286,10 +286,11 @@ async function runPaperMonitorOnce(reason = "interval", payloadOverrides = {}) {
     paperMonitor.running = false;
     paperMonitor.lastFinishedAt = new Date().toISOString();
   }
+  return { result, monitor: paperMonitorStatus() };
 }
 
 function startPaperMonitor(intervalMs = PAPER_MONITOR_DEFAULT_INTERVAL_MS, payloadOverrides = {}) {
-  paperMonitor.intervalMs = Math.max(1000, Number(intervalMs) || PAPER_MONITOR_DEFAULT_INTERVAL_MS);
+  paperMonitor.intervalMs = Math.max(PAPER_MONITOR_MIN_INTERVAL_MS, Number(intervalMs) || PAPER_MONITOR_DEFAULT_INTERVAL_MS);
   paperMonitor.payloadOverrides = { ...payloadOverrides };
   paperMonitor.enabled = true;
   if (paperMonitor.timer) {

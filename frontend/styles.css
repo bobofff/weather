@@ -478,11 +478,26 @@ th {
 }
 
 .paper-metrics {
-  grid-template-columns: repeat(2, minmax(140px, 1fr));
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.paper-metrics .metric {
+  padding: 10px 12px;
+}
+
+.paper-metrics .metric span {
+  font-size: 11px;
+}
+
+.paper-metrics .metric strong {
+  margin-top: 4px;
+  font-size: 17px;
 }
 
 .paper-monitor-metrics {
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 #paperMarks {
