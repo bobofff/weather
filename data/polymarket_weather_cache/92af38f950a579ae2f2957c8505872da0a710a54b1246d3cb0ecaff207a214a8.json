@@ -1,0 +1,29 @@
+[
+  {
+    "altim": 1012,
+    "clouds": [
+      {
+        "base": 4000,
+        "cover": "SCT"
+      }
+    ],
+    "cover": "SCT",
+    "dewp": 8,
+    "elev": 952,
+    "fltCat": "VFR",
+    "icaoId": "LTAC",
+    "lat": 40.128,
+    "lon": 32.995,
+    "metarType": "METAR",
+    "name": "Ankara/Esenboğa Intl, AN, TR",
+    "obsTime": 1783507800,
+    "qcField": 16,
+    "rawOb": "METAR LTAC 081050Z 25006KT 190V310 9999 SCT040 26/08 Q1012 NOSIG RMK RWY21C VRB06KT RWY03L 25006KT 180V340 RWY21R VRB04KT RWY03R 25004KT 160V290 RWY21L VRB05KT",
+    "receiptTime": "2026-07-08T11:06:09.750Z",
+    "reportTime": "2026-07-08T11:00:00.000Z",
+    "temp": 26,
+    "visib": "6+",
+    "wdir": 250,
+    "wspd": 6
+  }
+]

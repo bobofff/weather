@@ -48,6 +48,7 @@ from weather_quant.portfolio import (
 from weather_quant.storage import WeatherStorage
 from weather_quant.settlement import SettlementImporter
 from weather_quant.station_lookup import StationLookupClient
+from weather_quant.runtime_logs import log_sync_event
 from weather_quant.units import normalize_unit
 from weather_quant.weather import OpenMeteoEnsembleClient, WeatherEnsembleProvider
 
@@ -1379,17 +1380,207 @@ def paper_mark_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _paper_position_matches_reconcile_filters(
+    position: dict[str, Any],
+    *,
+    city_id: str | None,
+    target_date: str | None,
+    kind: str | None,
+) -> bool:
+    if city_id and position.get("city_id") != city_id:
+        return False
+    if target_date and position.get("target_date") != target_date:
+        return False
+    if kind and position.get("kind") != kind:
+        return False
+    return True
+
+
+def _auto_import_missing_paper_settlements(
+    *,
+    storage: WeatherStorage,
+    account_key: str,
+    city_id: str | None,
+    target_date: str | None,
+    kind: str | None,
+) -> dict[str, Any]:
+    today = date.today()
+    importer = SettlementImporter()
+    imported: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    positions = [
+        position
+        for position in storage.open_paper_positions(account_key=account_key)
+        if _paper_position_matches_reconcile_filters(
+            position,
+            city_id=city_id,
+            target_date=target_date,
+            kind=kind,
+        )
+    ]
+    for position in positions:
+        key = (
+            str(position.get("city_id") or ""),
+            str(position.get("target_date") or ""),
+            str(position.get("kind") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        position_date = date.fromisoformat(key[1])
+        if position_date >= today:
+            skipped.append(
+                {
+                    "cityId": key[0],
+                    "targetDate": key[1],
+                    "kind": key[2],
+                    "reason": "TARGET_DATE_NOT_COMPLETE",
+                }
+            )
+            continue
+        city = storage.get_city(key[0])
+        if city is None:
+            try:
+                city = get_city(key[0])
+            except KeyError:
+                errors.append(
+                    {
+                        "cityId": key[0],
+                        "targetDate": key[1],
+                        "kind": key[2],
+                        "error": f"Unknown city config: {key[0]}",
+                    }
+                )
+                continue
+        bucket = bucket_from_key(
+            bucket_label=str(position.get("bucket_label") or position.get("outcome") or ""),
+            bucket_key=_optional_text(position.get("bucket_key")),
+            default_unit=city.settlement_unit,
+        )
+        request_payload = {
+            "cityId": city.city_id,
+            "targetDate": key[1],
+            "kind": key[2],
+            "stationId": city.station_id,
+            "metarSource": city.metar_source,
+            "source": "paper-reconcile",
+        }
+        try:
+            observation = importer.import_observation(
+                city,
+                target_date=position_date,
+                kind=key[2],  # type: ignore[arg-type]
+                buckets=(bucket,),
+            )
+        except Exception as exc:  # noqa: BLE001
+            storage.save_settlement_import_run(
+                city=city,
+                target_date=key[1],
+                kind=key[2],
+                provider="settlement-interface",
+                station_id=city.station_id,
+                status="failed",
+                error_message=str(exc),
+                raw_request=request_payload,
+            )
+            errors.append(
+                {
+                    "cityId": key[0],
+                    "targetDate": key[1],
+                    "kind": key[2],
+                    "error": str(exc),
+                }
+            )
+            continue
+        import_run_key = storage.save_settlement_import_run(
+            city=city,
+            target_date=key[1],
+            kind=key[2],
+            provider=observation.source_provider,
+            station_id=observation.station_id,
+            status="success",
+            raw_request=request_payload,
+            raw_payload=observation.raw_payload,
+        )
+        settlement_key = storage.save_settlement(
+            observation,
+            import_run_key=import_run_key,
+        )
+        imported.append(
+            {
+                "cityId": key[0],
+                "targetDate": key[1],
+                "kind": key[2],
+                "settlementKey": settlement_key,
+            }
+        )
+    return {"imported": imported, "errors": errors, "skipped": skipped}
+
+
 def paper_reconcile_payload(payload: dict[str, Any]) -> dict[str, Any]:
     storage = _paper_storage(payload)
+    account_key = _paper_account_key(payload)
+    city_id = _optional_text(payload.get("city") or payload.get("cityId"))
+    target_date = _optional_text(payload.get("targetDate") or payload.get("date"))
+    kind = _optional_text(payload.get("temperatureKind") or payload.get("kind"))
     result = storage.reconcile_paper_positions(
-        account_key=_paper_account_key(payload),
-        city_id=_optional_text(payload.get("city") or payload.get("cityId")),
-        target_date=_optional_text(payload.get("targetDate") or payload.get("date")),
-        kind=_optional_text(payload.get("temperatureKind") or payload.get("kind")),
+        account_key=account_key,
+        city_id=city_id,
+        target_date=target_date,
+        kind=kind,
     )
+    import_result = {"imported": [], "errors": [], "skipped": []}
+    if _bool_value(payload.get("autoImportSettlements"), default=True):
+        import_result = _auto_import_missing_paper_settlements(
+            storage=storage,
+            account_key=account_key,
+            city_id=city_id,
+            target_date=target_date,
+            kind=kind,
+        )
+        if import_result["imported"]:
+            imported_result = storage.reconcile_paper_positions(
+                account_key=account_key,
+                city_id=city_id,
+                target_date=target_date,
+                kind=kind,
+            )
+            result["settlements"].extend(imported_result["settlements"])
+            result["summary"]["settledPositionCount"] += imported_result["summary"]["settledPositionCount"]
+            result["summary"]["payout"] += imported_result["summary"]["payout"]
+            result["summary"]["realizedPnl"] += imported_result["summary"]["realizedPnl"]
+            result["account"] = imported_result["account"]
+    result["summary"]["importedSettlementCount"] = len(import_result["imported"])
+    result["summary"]["importErrorCount"] = len(import_result["errors"])
+    result["summary"]["skippedSettlementImportCount"] = len(import_result["skipped"])
+    result["settlementImports"] = import_result
     result["portfolio"] = storage.paper_portfolio(
-        account_key=_paper_account_key(payload),
+        account_key=account_key,
         initial_cash=_paper_initial_cash(payload),
+    )
+    log_sync_event(
+        source="polymarket_weather",
+        action="paper_reconcile",
+        status="fail" if import_result["errors"] and not result["settlements"] else "success",
+        details={
+            "accountKey": account_key,
+            "cityId": city_id,
+            "targetDate": target_date,
+            "kind": kind,
+            "autoImportSettlements": _bool_value(payload.get("autoImportSettlements"), default=True),
+        },
+        result={
+            "settledPositionCount": result["summary"]["settledPositionCount"],
+            "payout": result["summary"]["payout"],
+            "realizedPnl": result["summary"]["realizedPnl"],
+            "importedSettlementCount": result["summary"]["importedSettlementCount"],
+            "importErrorCount": result["summary"]["importErrorCount"],
+            "skippedSettlementImportCount": result["summary"]["skippedSettlementImportCount"],
+            "settlements": result["settlements"],
+            "settlementImports": import_result,
+        },
     )
     return result
 

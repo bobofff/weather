@@ -1,0 +1,24 @@
+[
+  {
+    "altim": 1011,
+    "clouds": [],
+    "cover": "CAVOK",
+    "dewp": 7,
+    "elev": 952,
+    "fltCat": "VFR",
+    "icaoId": "LTAC",
+    "lat": 40.128,
+    "lon": 32.995,
+    "metarType": "METAR",
+    "name": "Ankara/Esenboğa Intl, AN, TR",
+    "obsTime": 1783563600,
+    "qcField": 16,
+    "rawOb": "METAR LTAC 090220Z 15004KT CAVOK 13/07 Q1011 NOSIG RMK RWY21C 16005KT RWY03L 13004KT RWY21R 14004KT RWY03R VRB01KT RWY21L 16003KT",
+    "receiptTime": "2026-07-09T02:30:22.152Z",
+    "reportTime": "2026-07-09T02:20:00.000Z",
+    "temp": 13,
+    "visib": "6+",
+    "wdir": 150,
+    "wspd": 4
+  }
+]

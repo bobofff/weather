@@ -132,6 +132,37 @@ class SettlementImportTest(unittest.TestCase):
         self.assertEqual(observation.bucket_label, "83 to 86")
         self.assertEqual(observation.observation_count, 3)
 
+    def test_aviation_weather_client_falls_back_to_historical_date_queries(self) -> None:
+        class FakeHttp:
+            calls: list[dict[str, str]] = []
+
+            def get_json(self, path, *, params=None, headers=None):  # noqa: ANN001, ANN003
+                self.calls.append(dict(params or {}))
+                if params and params.get("date"):
+                    return [
+                        {"obsTime": "2026-07-05T12:00:00Z", "temp": 27.0},
+                        {"obsTime": "2026-07-05T20:00:00Z", "temp": 29.0},
+                    ]
+                return [{"obsTime": "2026-07-07T12:00:00Z", "temp": 18.0}]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_http = FakeHttp()
+            client = AviationWeatherMetarSettlementClient(
+                http_client=fake_http,  # type: ignore[arg-type]
+                cache=FileCache(Path(tmpdir) / "cache"),
+            )
+            observation = client.fetch_observation(
+                city(),
+                target_date=date(2026, 7, 5),
+                kind="high",
+                buckets=buckets(),
+            )
+
+        self.assertGreater(len([call for call in fake_http.calls if call.get("date")]), 0)
+        self.assertAlmostEqual(observation.observed_value, 84.2)
+        self.assertEqual(observation.observation_count, 2)
+        self.assertEqual(observation.bucket_label, "83 to 86")
+
     def test_storage_reconciles_signal_outcomes_from_imported_settlement(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "weather.db"

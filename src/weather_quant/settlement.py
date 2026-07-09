@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from weather_quant.cache import FileCache
 from weather_quant.http import JsonHttpClient
 from weather_quant.models import CityConfig, TemperatureBucket, TemperatureKind, TemperatureUnit
-from weather_quant.runtime_logs import log_external_api_failure
+from weather_quant.runtime_logs import log_external_api_failure, log_sync_event
 from weather_quant.units import convert_temperature
 
 
@@ -161,6 +161,46 @@ def _metar_items(payload: Any) -> list[Mapping[str, Any]]:
     return []
 
 
+def _metar_observations_for_date(
+    payloads: Sequence[Any],
+    *,
+    tzinfo: ZoneInfo | timezone,
+    target_date: date,
+    settlement_unit: TemperatureUnit,
+) -> tuple[list[tuple[datetime, float]], list[TemperatureUnit]]:
+    observations: list[tuple[datetime, float]] = []
+    source_units: list[TemperatureUnit] = []
+    seen: set[tuple[str, float]] = set()
+    for payload in payloads:
+        for item in _metar_items(payload):
+            observed_at = _parse_observation_time(
+                item.get("obsTime")
+                or item.get("reportTime")
+                or item.get("time")
+                or item.get("valid_time")
+                or item.get("receiptTime")
+            )
+            temperature = _temperature_from_metar(item)
+            if observed_at is None or temperature is None:
+                continue
+            if observed_at.astimezone(tzinfo).date() != target_date:
+                continue
+            value, unit = temperature
+            converted = convert_temperature(
+                value,
+                from_unit=unit,
+                to_unit=settlement_unit,
+            )
+            dedupe_key = (observed_at.isoformat(), converted)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            observations.append((observed_at, converted))
+            source_units.append(unit)
+    observations.sort(key=lambda item: item[0])
+    return observations, source_units
+
+
 class AviationWeatherMetarSettlementClient:
     """Import daily high/low observations from a METAR JSON endpoint."""
 
@@ -227,35 +267,82 @@ class AviationWeatherMetarSettlementClient:
                 ) from exc
             self.cache.set(cache_key, payload)
 
-        observations: list[tuple[datetime, float]] = []
-        source_units: list[TemperatureUnit] = []
-        for item in _metar_items(payload):
-            observed_at = _parse_observation_time(
-                item.get("obsTime")
-                or item.get("reportTime")
-                or item.get("time")
-                or item.get("valid_time")
-                or item.get("receiptTime")
-            )
-            temperature = _temperature_from_metar(item)
-            if observed_at is None or temperature is None:
-                continue
-            if observed_at.astimezone(tzinfo).date() != target_date:
-                continue
-            value, unit = temperature
-            observations.append(
-                (
-                    observed_at,
-                    convert_temperature(
-                        value,
-                        from_unit=unit,
-                        to_unit=city.settlement_unit,
-                    ),
+        payloads: list[Any] = [payload]
+        observations, source_units = _metar_observations_for_date(
+            payloads,
+            tzinfo=tzinfo,
+            target_date=target_date,
+            settlement_unit=city.settlement_unit,
+        )
+        fallback_requests: list[dict[str, str]] = []
+        if not observations:
+            cursor = start_utc
+            while cursor < end_utc:
+                fallback_params = {
+                    "ids": station_id,
+                    "format": "json",
+                    "date": cursor.strftime("%Y%m%d_%H%M"),
+                }
+                fallback_requests.append(dict(fallback_params))
+                fallback_cache_key = {
+                    "provider": "aviationweather-metar",
+                    "path": path,
+                    "params": fallback_params,
+                }
+                fallback_payload = self.cache.get(
+                    fallback_cache_key,
+                    max_age_seconds=self.cache_max_age_seconds,
                 )
+                if fallback_payload is None:
+                    try:
+                        fallback_payload = self.http.get_json(path, params=fallback_params)
+                    except Exception as exc:
+                        log_external_api_failure(
+                            provider="aviationweather-metar",
+                            action="fetch_settlement_observation",
+                            endpoint=path,
+                            details={
+                                "city": city.city_id,
+                                "date": target_date.isoformat(),
+                                "kind": kind,
+                                "stationId": station_id,
+                                "requestDate": fallback_params["date"],
+                            },
+                            error=exc,
+                        )
+                        cursor += timedelta(minutes=30)
+                        continue
+                    self.cache.set(fallback_cache_key, fallback_payload)
+                payloads.append(fallback_payload)
+                cursor += timedelta(minutes=30)
+            observations, source_units = _metar_observations_for_date(
+                payloads,
+                tzinfo=tzinfo,
+                target_date=target_date,
+                settlement_unit=city.settlement_unit,
             )
-            source_units.append(unit)
 
         if not observations:
+            log_sync_event(
+                source="polymarket_weather",
+                action="fetch_settlement_observation",
+                status="fail",
+                details={
+                    "city": city.city_id,
+                    "date": target_date.isoformat(),
+                    "kind": kind,
+                    "stationId": station_id,
+                    "provider": "aviationweather-metar",
+                    "endpoint": path,
+                    "requestStart": params["start"],
+                    "requestEnd": params["end"],
+                },
+                result={
+                    "itemCount": sum(len(_metar_items(item)) for item in payloads),
+                    "usableObservationCount": 0,
+                    "fallbackRequestCount": len(fallback_requests),
+                },
+            )
             raise SettlementImportError(
                 f"{station_id} 在 {target_date.isoformat()} 没有可用温度观测。"
             )
@@ -285,8 +372,9 @@ class AviationWeatherMetarSettlementClient:
             bucket_key=bucket.canonical_key if bucket else None,
             raw_payload={
                 "request": params,
+                "fallbackRequests": fallback_requests,
                 "sourceUnits": source_units,
-                "payload": payload,
+                "payload": payloads,
             },
         )
 

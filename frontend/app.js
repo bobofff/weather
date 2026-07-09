@@ -450,6 +450,28 @@ function rejectReasonName(value) {
   return labels[reason] || reason || "-";
 }
 
+function settlementImportIssueText(result) {
+  const imports = result?.settlementImports || {};
+  const errors = Array.isArray(imports.errors) ? imports.errors : [];
+  const skipped = Array.isArray(imports.skipped) ? imports.skipped : [];
+  const parts = [];
+  if (errors.length) {
+    parts.push(
+      `失败：${errors
+        .map((item) => `${item.cityId || "-"} ${item.targetDate || "-"} ${item.kind || "-"} ${item.error || "-"}`)
+        .join("；")}`,
+    );
+  }
+  if (skipped.length) {
+    parts.push(
+      `跳过：${skipped
+        .map((item) => `${item.cityId || "-"} ${item.targetDate || "-"} ${item.kind || "-"} ${item.reason || "-"}`)
+        .join("；")}`,
+    );
+  }
+  return parts.length ? `（${parts.join("；")}）` : "";
+}
+
 function paperStatusTone(value) {
   const status = String(value || "");
   if (status === "FILLED" || status === "OPEN" || status === "ACCEPTED") return "";
@@ -547,6 +569,7 @@ function renderPaperPortfolio(result) {
   $("paperSummary").innerHTML = `<div class="metrics paper-metrics">${summaryMetrics}</div>`;
   const orderRows = (portfolio.orders || []).map((row) => `<tr>
     <td>${escapeHtml(formatBeijingTime(row.createdAt))}</td>
+    <td>${escapeHtml(row.targetDate || "-")}</td>
     <td>${escapeHtml(compactBucketLabel(row.bucketLabel || row.outcome, row.bucketKey))}</td>
     <td>${money(row.stakeUsdc)}</td>
     <td>${money(row.filledShares)}</td>
@@ -569,7 +592,7 @@ function renderPaperPortfolio(result) {
     <td>${escapeHtml(row.latestMark?.exitSignal || "-")}</td>
     <td><span class="badge ${paperStatusTone(row.status)}">${escapeHtml(row.status || "-")}</span></td>
   </tr>`);
-  $("paperOrders").innerHTML = `<h2>最近虚拟订单</h2>${table(["时间", "温度桶", "Stake", "Shares", "VWAP", "Edge", "状态", "拒绝原因"], orderRows)}`;
+  $("paperOrders").innerHTML = `<h2>最近虚拟订单</h2>${table(["下单时间", "盘口日期", "温度桶", "Stake", "Shares", "VWAP", "Edge", "状态", "拒绝原因"], orderRows)}`;
   $("paperPositions").innerHTML = `<h2>虚拟持仓</h2>${table(["温度桶", "Shares", "成本", "均价", "Bid", "Ask", "Mark", "可兑现", "Realized", "Unrealized", "退出信号", "状态"], positionRows)}`;
   renderPaperMarks(portfolio.marks || []);
 }
@@ -1378,14 +1401,26 @@ async function reconcilePaper() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         initialCash: Number($("paperInitialCash").value),
-        cityId: $("citySelect").value,
-        targetDate: $("targetDate").value,
-        kind: $("temperatureKind").value,
+        autoImportSettlements: true,
       }),
     });
     const result = await readJsonResponse(response, "虚拟盘结算失败");
     renderPaperPortfolio(result);
-    showNotice(`虚拟盘结算 ${result.summary?.settledPositionCount || 0} 个持仓，Realized PnL ${money(result.summary?.realizedPnl)}。`);
+    const summary = result.summary || {};
+    const importText = summary.importedSettlementCount
+      ? `，自动导入 ${summary.importedSettlementCount} 条结算`
+      : "";
+    const skippedText = summary.skippedSettlementImportCount
+      ? `，跳过 ${summary.skippedSettlementImportCount} 个未完成日期`
+      : "";
+    const errorText = summary.importErrorCount
+      ? `，${summary.importErrorCount} 个结算导入失败`
+      : "";
+    const issueText = settlementImportIssueText(result);
+    showNotice(
+      `虚拟盘结算 ${summary.settledPositionCount || 0} 个持仓${importText}${skippedText}${errorText}，Realized PnL ${money(summary.realizedPnl)}。${issueText}`,
+      Boolean(summary.importErrorCount) && !summary.settledPositionCount,
+    );
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
   } finally {

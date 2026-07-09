@@ -464,21 +464,95 @@ class PaperTradingTest(unittest.TestCase):
                 ),
                 import_run_key=import_run_key,
             )
-            reconciled = web_api.paper_reconcile_payload(
-                {
-                    "dbPath": str(db_path),
-                    "initialCash": 100,
-                    "cityId": "paper-city",
-                    "targetDate": "2026-07-05",
-                    "kind": "high",
-                }
-            )
+            with patch.object(web_api, "log_sync_event"):
+                reconciled = web_api.paper_reconcile_payload(
+                    {
+                        "dbPath": str(db_path),
+                        "initialCash": 100,
+                        "cityId": "paper-city",
+                        "targetDate": "2026-07-05",
+                        "kind": "high",
+                    }
+                )
 
         self.assertTrue(preview["preview"]["accepted"])
         self.assertTrue(buy["summary"]["accepted"])
         self.assertEqual(portfolio["summary"]["openPositionCount"], 1)
         self.assertEqual(reconciled["summary"]["settledPositionCount"], 1)
         self.assertAlmostEqual(reconciled["summary"]["realizedPnl"], 80)
+
+    def test_web_api_reconcile_scans_positions_and_imports_missing_settlements(self) -> None:
+        class FakeSettlementImporter:
+            calls: list[str] = []
+
+            def import_observation(
+                self,
+                imported_city: CityConfig,
+                *,
+                target_date: date,
+                kind: str,
+                buckets: tuple[TemperatureBucket, ...] = (),
+            ) -> SettlementObservation:
+                self.calls.append(target_date.isoformat())
+                bucket = buckets[0]
+                return SettlementObservation(
+                    city=imported_city,
+                    target_date=target_date,
+                    kind=kind,  # type: ignore[arg-type]
+                    observed_value=82.0,
+                    unit="F",
+                    source_provider="fixture",
+                    source_url="https://example.test",
+                    station_id="KNYC",
+                    settlement_station="Central Park",
+                    observation_count=24,
+                    bucket_label=bucket.label,
+                    bucket_key=bucket.canonical_key,
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "weather.db"
+            storage = WeatherStorage(db_path, initialize=True)
+            storage.save_city(city())
+            base_payload = {
+                "dbPath": str(db_path),
+                "unit": "F",
+                "initialCash": 100,
+                "stakeUsdc": 20,
+                "feeRate": 0.0,
+                "marketsCsv": markets_csv(),
+                "signal": signal(),
+            }
+            web_api.paper_buy_payload(
+                {
+                    **base_payload,
+                    "context": {**context(), "targetDate": "2020-01-01"},
+                }
+            )
+            web_api.paper_buy_payload(
+                {
+                    **base_payload,
+                    "context": {**context(), "targetDate": "2099-01-01"},
+                }
+            )
+            with (
+                patch.object(web_api, "SettlementImporter", FakeSettlementImporter),
+                patch.object(web_api, "log_sync_event"),
+            ):
+                reconciled = web_api.paper_reconcile_payload(
+                    {
+                        "dbPath": str(db_path),
+                        "initialCash": 100,
+                        "autoImportSettlements": True,
+                    }
+                )
+
+        self.assertEqual(FakeSettlementImporter.calls, ["2020-01-01"])
+        self.assertEqual(reconciled["summary"]["importedSettlementCount"], 1)
+        self.assertEqual(reconciled["summary"]["skippedSettlementImportCount"], 1)
+        self.assertEqual(reconciled["summary"]["settledPositionCount"], 1)
+        self.assertAlmostEqual(reconciled["summary"]["realizedPnl"], 80)
+        self.assertEqual(reconciled["portfolio"]["summary"]["openPositionCount"], 1)
 
     def test_web_api_mark_uses_supplied_market_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
