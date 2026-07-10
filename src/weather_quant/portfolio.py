@@ -527,6 +527,9 @@ def calculate_hedge_lock(
         current_cost=portfolio.total_cost,
         target_profit=target_profit,
     )
+    if not feasible:
+        # 求解失败时的 shares 只是迭代中间值，不能作为可执行 hedge 方案。
+        hedge_shares = {}
     hedge_legs: list[HedgeLeg] = []
     for key, shares in hedge_shares.items():
         if shares <= 1e-9:
@@ -589,6 +592,7 @@ def calculate_hedge_lock(
         and uncovered_tail_probability > 0.0
     )
     recommendation = _hedge_recommendation(
+        feasible=feasible,
         is_true_arbitrage=is_true_arbitrage,
         is_tail_risk_lock=is_tail_risk_lock,
         is_overround=is_overround,
@@ -621,6 +625,7 @@ def calculate_hedge_lock(
         is_overround=is_overround,
         is_true_arbitrage=is_true_arbitrage,
         is_tail_risk_lock=is_tail_risk_lock,
+        is_feasible=feasible,
         recommendation=recommendation,
         target_profit=target_profit,
         notes=tuple(notes),
@@ -678,14 +683,15 @@ def _solve_required_hedges(
         if abs(next_cost - h_cost) <= 1e-9:
             return next_shares, True, ""
         if next_cost > 1_000_000:
-            return next_shares, False, "hedge 方程未收敛，通常意味着覆盖桶 ask 成本过高。"
+            return {}, False, "hedge 方程未收敛，通常意味着覆盖桶 ask 成本过高。"
         hedge_shares = next_shares
         h_cost = next_cost
-    return hedge_shares, False, "hedge 方程达到迭代上限。"
+    return {}, False, "hedge 方程达到迭代上限。"
 
 
 def _hedge_recommendation(
     *,
+    feasible: bool,
     is_true_arbitrage: bool,
     is_tail_risk_lock: bool,
     is_overround: bool,
@@ -694,6 +700,8 @@ def _hedge_recommendation(
     uncovered_tail_probability: float,
     max_tail_probability: float,
 ) -> str:
+    if not feasible:
+        return "HEDGE_INFEASIBLE"
     if is_true_arbitrage:
         return "HEDGE_LOCK"
     if is_tail_risk_lock:

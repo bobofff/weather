@@ -22,6 +22,7 @@
           <a href="#ensemble-panel">Ensemble</a>
           <a href="#signal-panel">信号评分</a>
           <a href="#paper-panel">虚拟盘</a>
+          <a href="#model-competition-panel">模型竞赛</a>
           <a href="#llm-panel">AI 解读</a>
           <a href="#history-panel">历史记录</a>
           <a href="#weather-market-panel">天气盘口</a>
@@ -151,6 +152,37 @@
           <div id="paperOrders"></div>
           <div id="paperPositions"></div>
           <div id="paperMarks"></div>
+        </div>
+      </section>
+
+      <section id="model-competition-panel" class="panel">
+        <div class="panel-head">
+          <h2>模型竞赛虚拟盘</h2>
+          <div class="button-row">
+            <button id="runModelCompetitionButton" type="button">运行模型竞赛</button>
+            <button id="refreshModelCompetitionStatsButton" class="secondary" type="button">刷新模型竞赛统计</button>
+          </div>
+        </div>
+        <p class="muted">各模型使用独立虚拟账户与相同风控参数；只对 BUY_YES 候选落单。</p>
+        <div class="compact-grid paper-controls">
+          <label>模型（多选）
+            <select id="competitionModels" multiple size="3">
+              <option value="ecmwf_aifs025" selected>ECMWF AIFS Ensemble 0.25</option>
+              <option value="ecmwf_ifs025" selected>ECMWF IFS Ensemble 0.25</option>
+              <option value="gfs_seamless" selected>GFS Ensemble Seamless</option>
+            </select>
+          </label>
+          <label>城市（多选）
+            <select id="competitionCities" multiple size="3"></select>
+          </label>
+          <label>Stake（留空=Kelly）
+            <input id="competitionStake" type="number" min="0" step="1" placeholder="沿用虚拟盘">
+          </label>
+        </div>
+        <div class="history-grid">
+          <div id="modelCompetitionResults"></div>
+          <div id="modelCompetitionLeaderboard"></div>
+          <div id="modelCompetitionCityLeaderboard"></div>
         </div>
       </section>
 

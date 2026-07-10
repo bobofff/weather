@@ -215,17 +215,23 @@ def paper_position_key(
     kind: str | None,
     bucket_key: str,
     token_id: str | None,
+    model: str | None = None,
+    run_key: str | None = None,
 ) -> str:
-    digest = stable_payload_hash(
-        {
-            "account_key": account_key,
-            "city_id": city_id,
-            "target_date": target_date,
-            "kind": kind,
-            "bucket_key": bucket_key,
-            "token_id": token_id,
-        }
-    )[:20]
+    payload: dict[str, Any] = {
+        "account_key": account_key,
+        "city_id": city_id,
+        "target_date": target_date,
+        "kind": kind,
+        "bucket_key": bucket_key,
+        "token_id": token_id,
+    }
+    # 保持既有普通虚拟盘持仓键稳定；模型竞赛持仓额外按模型运行隔离。
+    if model:
+        payload["model"] = model
+    if run_key:
+        payload["run_key"] = run_key
+    digest = stable_payload_hash(payload)[:20]
     return f"paper-position:{digest}"
 
 
@@ -411,6 +417,7 @@ def _preview_base(
         "metarSource": optional_text(context.get("metarSource") or context.get("metar_source") or signal.get("metarSource")),
         "signalSnapshotId": signal.get("signalSnapshotId") or signal.get("signal_snapshot_id"),
         "runKey": signal.get("runKey") or signal.get("run_key") or context.get("runKey"),
+        "model": signal.get("model") or context.get("model"),
         "marketSnapshotGroup": signal.get("marketSnapshotGroup") or signal.get("market_snapshot_group") or context.get("marketSnapshotGroup"),
         "ensembleProbability": optional_float(signal.get("ensembleProbability") or signal.get("ensemble_probability")),
         "executableEntryCost": optional_float(signal.get("executableEntryCost") or signal.get("executable_entry_cost")),
@@ -455,6 +462,8 @@ def _rejected_preview(
         "cityId": context.get("cityId"),
         "targetDate": context.get("targetDate"),
         "kind": context.get("kind"),
+        "model": signal.get("model") or context.get("model"),
+        "runKey": signal.get("runKey") or signal.get("run_key") or context.get("runKey"),
         "ensembleProbability": optional_float(signal.get("ensembleProbability")),
         "edge": optional_float(signal.get("edge")),
         "filledShares": 0.0,
@@ -770,6 +779,7 @@ def hedge_preview(
             "globalWorstCasePnl": lock.worst_case_pnl,
             "isTailRiskLock": lock.is_tail_risk_lock,
             "isTrueArbitrage": lock.is_true_arbitrage,
+            "hedgeFeasible": lock.is_feasible,
             "tailRiskLockDisclaimer": "This is not risk-free arbitrage; uncovered tail buckets can still lose.",
         },
         "adjacent": adjacent,
@@ -783,6 +793,7 @@ def hedge_preview(
             "lockProfit": lock.lock_profit,
             "isTailRiskLock": lock.is_tail_risk_lock,
             "isTrueArbitrage": lock.is_true_arbitrage,
+            "feasible": lock.is_feasible,
             "notes": list(lock.notes),
             "hedgeLegs": [
                 {

@@ -313,6 +313,160 @@ class PaperTradingTest(unittest.TestCase):
         self.assertAlmostEqual(portfolio["summary"]["cash"], 180)
         self.assertEqual(portfolio["positions"][0]["status"], "SETTLED")
 
+    def test_model_competition_orders_are_isolated_and_ranked_after_settlement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "weather.db"
+            storage = WeatherStorage(db_path, initialize=True)
+            orders = []
+            for model, run_key in (
+                ("ecmwf_aifs025", "run-aifs"),
+                ("gfs_seamless", "run-gfs"),
+            ):
+                competition_signal = {
+                    **signal(),
+                    "model": model,
+                    "runKey": run_key,
+                }
+                orders.append(
+                    storage.execute_paper_buy(
+                        signal=competition_signal,
+                        market_buckets=(market_bucket(0),),
+                        context={**context(), "model": model, "runKey": run_key},
+                        initial_cash=100,
+                        stake_usdc=20,
+                        fee_rate=0.0,
+                    )
+                )
+            self.assertNotEqual(
+                orders[0]["position"]["positionKey"],
+                orders[1]["position"]["positionKey"],
+            )
+            self.assertEqual(orders[0]["order"]["model"], "ecmwf_aifs025")
+            self.assertEqual(orders[1]["trade"]["runKey"], "run-gfs")
+
+            import_run_key = storage.save_settlement_import_run(
+                city=city(),
+                target_date="2026-07-05",
+                kind="high",
+                provider="fixture",
+                station_id="KNYC",
+                status="success",
+            )
+            storage.save_settlement(
+                SettlementObservation(
+                    city=city(),
+                    target_date=date(2026, 7, 5),
+                    kind="high",
+                    observed_value=82.0,
+                    unit="F",
+                    source_provider="fixture",
+                    source_url="https://example.test",
+                    station_id="KNYC",
+                    settlement_station="Central Park",
+                    observation_count=24,
+                    observation_start=datetime(2026, 7, 5, tzinfo=timezone.utc),
+                    observation_end=datetime(2026, 7, 6, tzinfo=timezone.utc),
+                    bucket_label="80 to 83",
+                    bucket_key=buckets()[0].canonical_key,
+                ),
+                import_run_key=import_run_key,
+            )
+            settlement = storage.reconcile_paper_positions()
+            stats = storage.model_competition_stats()
+
+        self.assertEqual(settlement["summary"]["settledPositionCount"], 2)
+        self.assertEqual({row["model"] for row in stats["byModel"]}, {"ecmwf_aifs025", "gfs_seamless"})
+        for row in stats["byModel"]:
+            self.assertEqual(row["orderCount"], 1)
+            self.assertEqual(row["settledOrderCount"], 1)
+            self.assertEqual(row["hitCount"], 1)
+            self.assertAlmostEqual(row["winRate"], 1.0)
+            self.assertAlmostEqual(row["realizedPnl"], 80.0)
+            self.assertAlmostEqual(row["roi"], 4.0)
+
+    def test_model_competition_batch_records_model_and_run_key(self) -> None:
+        market_payload = web_api._market_bucket_payload(market_bucket(0))
+
+        def fake_ensemble(payload: dict[str, object], *, include_signals: bool) -> dict[str, object]:
+            model = str(payload["ensembleModel"])
+            return {
+                "summary": {
+                    "runKey": f"run:{model}",
+                    "model": model,
+                    "cityId": "paper-city",
+                    "cityName": "Paper City",
+                    "targetDate": "2026-07-05",
+                    "kind": "high",
+                    "unit": "F",
+                    "settlementStation": "Central Park",
+                    "stationId": "KNYC",
+                    "marketSnapshotGroup": f"market:{model}",
+                },
+                "signals": [signal()],
+                "marketBuckets": [market_payload],
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            web_api, "_ensemble_payload", side_effect=fake_ensemble
+        ):
+            db_path = str(Path(tmpdir) / "weather.db")
+            result = web_api.model_competition_payload(
+                {
+                    "dbPath": db_path,
+                    "cityIds": ["paper-city"],
+                    "models": ["ecmwf_aifs025", "gfs_seamless"],
+                    "targetDate": "2026-07-05",
+                    "temperatureKind": "high",
+                    "stakeUsdc": 20,
+                    "feeRate": 0,
+                    "initialCash": 100,
+                }
+            )
+            storage = WeatherStorage(db_path)
+            by_model = storage.model_competition_stats()["byModel"]
+
+        self.assertEqual(result["summary"]["acceptedOrderCount"], 2)
+        self.assertEqual({row["model"] for row in result["results"]}, {"ecmwf_aifs025", "gfs_seamless"})
+        self.assertEqual({row["model"] for row in by_model}, {"ecmwf_aifs025", "gfs_seamless"})
+
+    def test_regular_reconcile_also_settles_model_competition_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "weather.db")
+            storage = WeatherStorage(db_path, initialize=True)
+            storage.execute_paper_buy(
+                signal={**signal(), "model": "ecmwf_aifs025", "runKey": "competition-run"},
+                market_buckets=(market_bucket(0),),
+                context={**context(), "model": "ecmwf_aifs025", "runKey": "competition-run"},
+                account_key="model-competition:ecmwf_aifs025",
+                initial_cash=100,
+                stake_usdc=20,
+                fee_rate=0.0,
+            )
+            import_run_key = storage.save_settlement_import_run(
+                city=city(), target_date="2026-07-05", kind="high",
+                provider="fixture", station_id="KNYC", status="success",
+            )
+            storage.save_settlement(
+                SettlementObservation(
+                    city=city(), target_date=date(2026, 7, 5), kind="high",
+                    observed_value=82.0, unit="F", source_provider="fixture",
+                    source_url="https://example.test", station_id="KNYC",
+                    settlement_station="Central Park", observation_count=24,
+                    observation_start=datetime(2026, 7, 5, tzinfo=timezone.utc),
+                    observation_end=datetime(2026, 7, 6, tzinfo=timezone.utc),
+                    bucket_label="80 to 83", bucket_key=buckets()[0].canonical_key,
+                ),
+                import_run_key=import_run_key,
+            )
+            with patch.object(web_api, "log_sync_event"):
+                result = web_api.paper_reconcile_payload(
+                    {"dbPath": db_path, "autoImportSettlements": False}
+                )
+            stats = storage.model_competition_stats()
+
+        self.assertEqual(result["summary"]["settledPositionCount"], 1)
+        self.assertEqual(stats["byModel"][0]["settledOrderCount"], 1)
+
     def test_exit_preview_estimates_market_sell(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = WeatherStorage(Path(tmpdir) / "weather.db", initialize=True)

@@ -431,6 +431,14 @@ const backendServer = createServer((req, res) => {
     void handleApi(req, res, "paper-buy");
     return;
   }
+  if (req.method === "POST" && req.url === "/api/model-competition/run") {
+    void handleApi(req, res, "model-competition");
+    return;
+  }
+  if (req.method === "GET" && req.url?.startsWith("/api/model-competition/stats")) {
+    void handleApi(req, res, "model-competition-stats");
+    return;
+  }
   if (req.method === "GET" && req.url?.startsWith("/api/paper/portfolio")) {
     void handleApi(req, res, "paper-portfolio");
     return;
@@ -548,6 +556,14 @@ const frontendServer = createServer((req, res) => {
   }
   if (req.method === "POST" && req.url === "/api/paper/buy") {
     void handleApi(req, res, "paper-buy");
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/model-competition/run") {
+    void handleApi(req, res, "model-competition");
+    return;
+  }
+  if (req.method === "GET" && req.url?.startsWith("/api/model-competition/stats")) {
+    void handleApi(req, res, "model-competition-stats");
     return;
   }
   if (req.method === "GET" && req.url?.startsWith("/api/paper/portfolio")) {

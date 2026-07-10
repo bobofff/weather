@@ -217,6 +217,7 @@ CREATE TABLE IF NOT EXISTS weather_paper_orders (
   account_key TEXT NOT NULL,
   signal_snapshot_id INTEGER,
   run_key TEXT,
+  model TEXT,
   market_snapshot_group TEXT,
   city_id TEXT,
   city_name TEXT,
@@ -260,6 +261,8 @@ CREATE TABLE IF NOT EXISTS weather_paper_trades (
   account_key TEXT NOT NULL,
   order_key TEXT NOT NULL,
   position_key TEXT NOT NULL,
+  run_key TEXT,
+  model TEXT,
   side TEXT NOT NULL,
   outcome TEXT NOT NULL,
   bucket_label TEXT NOT NULL,
@@ -278,6 +281,8 @@ CREATE TABLE IF NOT EXISTS weather_paper_positions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   position_key TEXT NOT NULL UNIQUE,
   account_key TEXT NOT NULL,
+  run_key TEXT,
+  model TEXT,
   city_id TEXT,
   city_name TEXT,
   target_date TEXT,
@@ -339,6 +344,8 @@ CREATE TABLE IF NOT EXISTS weather_paper_position_settlements (
   settlement_record_key TEXT NOT NULL UNIQUE,
   account_key TEXT NOT NULL,
   position_key TEXT NOT NULL,
+  run_key TEXT,
+  model TEXT,
   settlement_key TEXT NOT NULL,
   city_id TEXT NOT NULL,
   target_date TEXT NOT NULL,
@@ -542,6 +549,7 @@ SCHEMA_COMMENTS: tuple[tuple[str, str, str | None, str], ...] = (
     ("column", "weather_paper_orders", "account_key", "所属虚拟账户文本键"),
     ("column", "weather_paper_orders", "signal_snapshot_id", "来源信号快照自增 ID"),
     ("column", "weather_paper_orders", "run_key", "来源 ensemble 运行文本键"),
+    ("column", "weather_paper_orders", "model", "来源天气集合预报模型"),
     ("column", "weather_paper_orders", "market_snapshot_group", "来源市场快照分组键"),
     ("column", "weather_paper_orders", "city_id", "城市配置 ID"),
     ("column", "weather_paper_orders", "city_name", "城市显示名称"),
@@ -583,6 +591,8 @@ SCHEMA_COMMENTS: tuple[tuple[str, str, str | None, str], ...] = (
     ("column", "weather_paper_trades", "account_key", "所属虚拟账户文本键"),
     ("column", "weather_paper_trades", "order_key", "来源虚拟订单文本键"),
     ("column", "weather_paper_trades", "position_key", "聚合持仓文本键"),
+    ("column", "weather_paper_trades", "run_key", "来源 ensemble 运行文本键"),
+    ("column", "weather_paper_trades", "model", "来源天气集合预报模型"),
     ("column", "weather_paper_trades", "side", "虚拟成交方向"),
     ("column", "weather_paper_trades", "outcome", "市场 outcome 文本"),
     ("column", "weather_paper_trades", "bucket_label", "温度桶标签"),
@@ -599,6 +609,8 @@ SCHEMA_COMMENTS: tuple[tuple[str, str, str | None, str], ...] = (
     ("column", "weather_paper_positions", "id", "自增主键"),
     ("column", "weather_paper_positions", "position_key", "虚拟持仓文本键"),
     ("column", "weather_paper_positions", "account_key", "所属虚拟账户文本键"),
+    ("column", "weather_paper_positions", "run_key", "来源 ensemble 运行文本键"),
+    ("column", "weather_paper_positions", "model", "来源天气集合预报模型"),
     ("column", "weather_paper_positions", "city_id", "城市配置 ID"),
     ("column", "weather_paper_positions", "city_name", "城市显示名称"),
     ("column", "weather_paper_positions", "target_date", "目标结算日期"),
@@ -656,6 +668,8 @@ SCHEMA_COMMENTS: tuple[tuple[str, str, str | None, str], ...] = (
     ("column", "weather_paper_position_settlements", "settlement_record_key", "虚拟持仓结算文本键"),
     ("column", "weather_paper_position_settlements", "account_key", "所属虚拟账户文本键"),
     ("column", "weather_paper_position_settlements", "position_key", "虚拟持仓文本键"),
+    ("column", "weather_paper_position_settlements", "run_key", "来源 ensemble 运行文本键"),
+    ("column", "weather_paper_position_settlements", "model", "来源天气集合预报模型"),
     ("column", "weather_paper_position_settlements", "settlement_key", "匹配的结算结果文本键"),
     ("column", "weather_paper_position_settlements", "city_id", "城市配置 ID"),
     ("column", "weather_paper_position_settlements", "target_date", "目标结算日期"),
@@ -696,6 +710,7 @@ def init_database(path: Path | str | None = None) -> Path:
     database_path = Path(path).expanduser() if path else DEFAULT_DB_PATH
     with connect_database(database_path) as connection:
         connection.executescript(SCHEMA_SQL)
+        _ensure_paper_model_columns(connection)
         connection.execute("DELETE FROM schema_comments")
         connection.executemany(
             """
@@ -706,3 +721,21 @@ def init_database(path: Path | str | None = None) -> Path:
         )
         connection.commit()
     return database_path
+
+
+def _ensure_paper_model_columns(connection: sqlite3.Connection) -> None:
+    """兼容已创建的 SQLite 虚拟盘数据库，不使用外键。"""
+    required_columns = {
+        "weather_paper_orders": {"model": "TEXT"},
+        "weather_paper_trades": {"run_key": "TEXT", "model": "TEXT"},
+        "weather_paper_positions": {"run_key": "TEXT", "model": "TEXT"},
+        "weather_paper_position_settlements": {"run_key": "TEXT", "model": "TEXT"},
+    }
+    for table, columns in required_columns.items():
+        existing = {
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column, definition in columns.items():
+            if column not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

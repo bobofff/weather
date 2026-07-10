@@ -515,6 +515,8 @@ function renderPaperHedgePreview(result) {
   const summary = result.summary || {};
   const adjacent = result.adjacent || {};
   const tail = result.tailRiskLock || {};
+  const hedgeFeasible = tail.feasible ?? summary.hedgeFeasible ?? true;
+  const hedgeReason = Array.isArray(tail.notes) ? tail.notes.join("；") : "";
   const metrics = [
     metric("相邻桶建议", adjacent.recommendation || "-"),
     metric("主桶", adjacent.mainOutcome || "-"),
@@ -527,6 +529,7 @@ function renderPaperHedgePreview(result) {
     metric("Covered worst PnL", money(summary.coveredWorstCasePnl)),
     metric("Global worst PnL", money(summary.globalWorstCasePnl)),
     metric("Tail hedge cost", money(tail.hedgeCost)),
+    metric("Hedge 状态", hedgeFeasible ? "可计算" : "不可行", hedgeFeasible ? "" : "bad"),
     metric("Tail lock", summary.isTailRiskLock ? "是" : "否", summary.isTailRiskLock ? "good" : "watch"),
     metric("真套利", summary.isTrueArbitrage ? "是" : "否"),
   ].join("");
@@ -548,6 +551,7 @@ function renderPaperHedgePreview(result) {
   target.innerHTML = `
     <h2>Hedge Preview</h2>
     <div class="metrics paper-metrics">${metrics}</div>
+    ${hedgeReason ? `<p>${escapeHtml(hedgeReason)}</p>` : ""}
     ${table(["类型", "温度桶", "份额", "价格", "成本"], hedgeRows)}
   `;
 }
@@ -578,7 +582,12 @@ function renderPaperPortfolio(result) {
     <td><span class="badge ${paperStatusTone(row.status)}">${escapeHtml(row.status || "-")}</span></td>
     <td>${escapeHtml(rejectReasonName(row.rejectReason))}</td>
   </tr>`);
-  const positionRows = (portfolio.positions || []).map((row) => `<tr>
+  const positions = [...(portfolio.positions || [])].sort((left, right) => (
+    String(right.targetDate || "").localeCompare(String(left.targetDate || ""))
+    || String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))
+  ));
+  const positionRows = positions.map((row) => `<tr>
+    <td>${escapeHtml(row.targetDate || "-")}</td>
     <td>${escapeHtml(compactBucketLabel(row.bucketLabel || row.outcome, row.bucketKey))}</td>
     <td>${money(row.openShares)}</td>
     <td>${money(row.totalCost)}</td>
@@ -593,7 +602,7 @@ function renderPaperPortfolio(result) {
     <td><span class="badge ${paperStatusTone(row.status)}">${escapeHtml(row.status || "-")}</span></td>
   </tr>`);
   $("paperOrders").innerHTML = `<h2>最近虚拟订单</h2>${table(["下单时间", "盘口日期", "温度桶", "Stake", "Shares", "VWAP", "Edge", "状态", "拒绝原因"], orderRows)}`;
-  $("paperPositions").innerHTML = `<h2>虚拟持仓</h2>${table(["温度桶", "Shares", "成本", "均价", "Bid", "Ask", "Mark", "可兑现", "Realized", "Unrealized", "退出信号", "状态"], positionRows)}`;
+  $("paperPositions").innerHTML = `<h2>虚拟持仓</h2>${table(["盘口日期", "温度桶", "Shares", "成本", "均价", "Bid", "Ask", "Mark", "可兑现", "Realized", "Unrealized", "退出信号", "状态"], positionRows)}`;
   renderPaperMarks(portfolio.marks || []);
 }
 
@@ -1087,11 +1096,110 @@ async function loadCities(selectedCityId = savedCityId() || $("citySelect").valu
     $("citySelect").innerHTML = cityRecords.map((city) => (
       `<option value="${escapeHtml(city.cityId)}" data-unit="${escapeHtml(city.settlementUnit)}">${escapeHtml(city.name)}</option>`
     )).join("");
+    const competitionCities = $("competitionCities");
+    if (competitionCities) {
+      competitionCities.innerHTML = cityRecords.map((city) => (
+        `<option value="${escapeHtml(city.cityId)}">${escapeHtml(city.name)}</option>`
+      )).join("");
+      const current = selected || cityRecords[0]?.cityId;
+      for (const option of competitionCities.options) option.selected = option.value === current;
+    }
     if (selected) {
       $("citySelect").value = selected;
       rememberCityId(selected);
       syncUnitFromCity();
     }
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+function selectedValues(id) {
+  const select = $(id);
+  return select ? Array.from(select.selectedOptions).map((option) => option.value) : [];
+}
+
+function modelCompetitionPayload() {
+  const city = selectedCityRecord();
+  const payload = {
+    cityIds: selectedValues("competitionCities"),
+    models: selectedValues("competitionModels"),
+    targetDate: $("targetDate").value,
+    temperatureKind: $("temperatureKind").value,
+    unit: city?.settlementUnit || $("unit").value,
+    marketSlug: $("marketSlug").value,
+    conditionId: $("conditionId").value,
+    marketQuery: $("marketQuery").value,
+    includeOrderbooks: $("includeOrderbooks").checked,
+    initialCash: Number($("paperInitialCash").value || 1000),
+    minEdge: Number($("minEdge").value || 0.03),
+    feeRate: Number($("feeRate").value || 0.05),
+    maxSpread: Number($("paperMaxSpread").value || 0.12),
+    minAskDepthShares: Number($("paperMinAskDepth").value || 1),
+    maxMarketExposure: Number($("paperMaxMarketExposure").value || 100),
+    maxCityDateExposure: Number($("paperMaxCityDateExposure").value || 200),
+  };
+  const stakeText = $("competitionStake")?.value.trim();
+  if (stakeText) payload.stakeUsdc = Number(stakeText);
+  return payload;
+}
+
+function renderModelCompetitionStats(statistics = {}) {
+  const modelRows = (statistics.byModel || []).map((row) => `<tr>
+    <td>${escapeHtml(row.model)}</td><td>${row.orderCount}</td><td>${row.settledOrderCount}</td>
+    <td>${row.hitCount}</td><td>${pct(row.winRate)}</td><td>${money(row.totalStake)}</td>
+    <td>${money(row.totalPayout)}</td><td>${money(row.realizedPnl)}</td><td>${pct(row.roi)}</td><td>${signedPct(row.averageEdge)}</td>
+  </tr>`);
+  $("modelCompetitionLeaderboard").innerHTML = `<h2>模型排行榜</h2>${table(["模型", "订单", "已结算", "命中", "胜率", "Stake", "Payout", "PnL", "ROI", "平均 Edge"], modelRows)}`;
+  const cityRows = (statistics.byCityModel || []).map((row) => `<tr>
+    <td>${escapeHtml(row.cityName || row.cityId || "-")}</td><td>${escapeHtml(row.model)}</td>
+    <td>${row.orderCount}</td><td>${row.settledOrderCount}</td><td>${pct(row.winRate)}</td>
+    <td>${money(row.realizedPnl)}</td><td>${pct(row.roi)}</td>
+  </tr>`);
+  $("modelCompetitionCityLeaderboard").innerHTML = `<h2>城市 × 模型排行榜</h2>${table(["城市", "模型", "订单", "已结算", "胜率", "PnL", "ROI"], cityRows)}`;
+}
+
+function renderModelCompetitionResults(result) {
+  const rows = (result?.results || []).map((row) => `<tr>
+    <td>${escapeHtml(row.model)}</td><td>${escapeHtml(row.cityName || row.cityId || "-")}</td>
+    <td>${escapeHtml(compactBucketLabel(row.bucketLabel, row.bucketKey))}</td><td>${pct(row.ensembleProbability)}</td>
+    <td>${signedPct(row.edge)}</td><td><span class="badge ${row.accepted ? "" : "danger"}">${row.accepted ? "已下单" : "未下单"}</span></td>
+    <td>${escapeHtml(rejectReasonName(row.rejectReason))}</td>
+  </tr>`);
+  $("modelCompetitionResults").innerHTML = `<h2>本次模型竞赛</h2>${table(["模型", "城市", "温度桶", "概率", "Edge", "结果", "原因"], rows)}`;
+  renderModelCompetitionStats(result?.statistics || {});
+}
+
+async function runModelCompetition() {
+  const button = $("runModelCompetitionButton");
+  const payload = modelCompetitionPayload();
+  if (!payload.models.length || !payload.cityIds.length) {
+    showNotice("请至少选择一个模型和一个城市。", true);
+    return;
+  }
+  button.disabled = true;
+  showNotice("正在运行模型竞赛并保存 BUY_YES 虚拟订单...");
+  try {
+    const response = await fetch(`${API_BASE}/api/model-competition/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await readJsonResponse(response, "运行模型竞赛失败");
+    renderModelCompetitionResults(result);
+    showNotice(`模型竞赛完成：${result.summary?.acceptedOrderCount || 0} 笔 BUY_YES 虚拟订单已成交。`);
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function refreshModelCompetitionStats() {
+  try {
+    const response = await fetch(`${API_BASE}/api/model-competition/stats`);
+    const result = await readJsonResponse(response, "读取模型竞赛统计失败");
+    renderModelCompetitionStats(result.statistics || {});
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
   }
@@ -1468,12 +1576,15 @@ async function init() {
   $("paperMonitorStopButton")?.addEventListener("click", stopPaperMonitor);
   $("paperHedgePreviewButton")?.addEventListener("click", previewPaperHedge);
   $("paperReconcileButton")?.addEventListener("click", reconcilePaper);
+  $("runModelCompetitionButton")?.addEventListener("click", runModelCompetition);
+  $("refreshModelCompetitionStatsButton")?.addEventListener("click", refreshModelCompetitionStats);
   $("explainSignalButton")?.addEventListener("click", explainResult);
   syncLlmButtons();
   await loadCities();
   await loadHistory();
   await loadPaperPortfolio();
   await loadPaperMonitorStatus();
+  await refreshModelCompetitionStats();
 }
 
 void init();

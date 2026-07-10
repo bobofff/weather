@@ -674,6 +674,7 @@ class PortfolioLockResult:
     is_overround: bool
     is_true_arbitrage: bool
     is_tail_risk_lock: bool
+    is_feasible: bool
     recommendation: str
     target_profit: float = 0.0
     notes: tuple[str, ...] = ()

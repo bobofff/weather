@@ -1047,6 +1047,7 @@ def portfolio_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "midpointSum": lock.midpoint_sum,
             "isTrueArbitrage": lock.is_true_arbitrage,
             "isTailRiskLock": lock.is_tail_risk_lock,
+            "hedgeFeasible": lock.is_feasible,
             "recommendation": lock.recommendation,
             "notes": list(lock.notes),
         },
@@ -1306,6 +1307,151 @@ def paper_portfolio_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+MODEL_COMPETITION_MODELS = (
+    "ecmwf_aifs025",
+    "ecmwf_ifs025",
+    "gfs_seamless",
+)
+
+
+def _competition_models_from_payload(payload: dict[str, Any]) -> tuple[str, ...]:
+    models = _models_from_payload(payload) or MODEL_COMPETITION_MODELS
+    invalid = sorted(set(models) - set(MODEL_COMPETITION_MODELS))
+    if invalid:
+        raise ValueError(f"Unsupported competition models: {', '.join(invalid)}")
+    return tuple(dict.fromkeys(models))
+
+
+def _competition_city_ids_from_payload(payload: dict[str, Any]) -> tuple[str, ...]:
+    raw = payload.get("cityIds") or payload.get("cities")
+    if isinstance(raw, str):
+        values = [item.strip() for item in raw.split(",")]
+    elif isinstance(raw, (list, tuple)):
+        values = [str(item).strip() for item in raw]
+    else:
+        values = [_optional_text(payload.get("city") or payload.get("cityId")) or ""]
+    city_ids = tuple(dict.fromkeys(value for value in values if value))
+    if not city_ids:
+        raise ValueError("Provide cityIds or city for model competition.")
+    return city_ids
+
+
+def model_competition_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """按模型独立运行同一套信号和虚拟盘风控，保存可复盘的比赛订单。"""
+    storage = _paper_storage(payload)
+    models = _competition_models_from_payload(payload)
+    city_ids = _competition_city_ids_from_payload(payload)
+    results: list[dict[str, Any]] = []
+    for city_id in city_ids:
+        for model in models:
+            run_payload = {
+                **payload,
+                "city": city_id,
+                "cityId": city_id,
+                "ensembleModel": model,
+                "model": model,
+                "saveSqlite": True,
+            }
+            # 多城市时坐标必须跟随城市配置，不能复用页面上可能存在的自定义坐标。
+            run_payload.pop("latitude", None)
+            run_payload.pop("longitude", None)
+            run_payload.pop("lat", None)
+            run_payload.pop("lon", None)
+            run_payload.pop("lng", None)
+            ensemble = _ensemble_payload(run_payload, include_signals=True)
+            summary = ensemble["summary"]
+            market_buckets = market_buckets_from_payload(
+                ensemble["marketBuckets"],
+                default_unit=str(summary["unit"]),
+            )
+            context = {
+                "cityId": summary["cityId"],
+                "cityName": summary["cityName"],
+                "targetDate": summary["targetDate"],
+                "kind": summary["kind"],
+                "settlementStation": summary["settlementStation"],
+                "stationId": summary["stationId"],
+                "runKey": summary["runKey"],
+                "model": model,
+                "marketSnapshotGroup": summary["marketSnapshotGroup"],
+            }
+            account_key = f"model-competition:{model}"
+            for signal in ensemble["signals"]:
+                enriched_signal = {
+                    **signal,
+                    "runKey": summary["runKey"],
+                    "model": model,
+                    "cityId": summary["cityId"],
+                    "cityName": summary["cityName"],
+                    "targetDate": summary["targetDate"],
+                    "kind": summary["kind"],
+                }
+                if enriched_signal.get("recommendation") == "BUY_YES":
+                    trade_result = storage.execute_paper_buy(
+                        signal=enriched_signal,
+                        market_buckets=market_buckets,
+                        context=context,
+                        account_key=account_key,
+                        initial_cash=_paper_initial_cash(payload),
+                        stake_usdc=_paper_optional_stake(payload),
+                        min_edge=_paper_number(payload, DEFAULT_MIN_EDGE, "minEdge"),
+                        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+                        max_spread=_paper_number(payload, DEFAULT_MAX_SPREAD, "maxSpread"),
+                        min_ask_depth_shares=_paper_number(payload, DEFAULT_MIN_ASK_DEPTH_SHARES, "minAskDepthShares"),
+                        max_market_exposure=_paper_number(payload, DEFAULT_MAX_MARKET_EXPOSURE, "maxMarketExposure"),
+                        max_city_date_exposure=_paper_number(payload, DEFAULT_MAX_CITY_DATE_EXPOSURE, "maxCityDateExposure"),
+                    )
+                    preview = trade_result["preview"]
+                    order = trade_result["order"]
+                else:
+                    preview = storage.paper_buy_preview(
+                        signal=enriched_signal,
+                        market_buckets=market_buckets,
+                        context=context,
+                        account_key=account_key,
+                        initial_cash=_paper_initial_cash(payload),
+                        stake_usdc=_paper_optional_stake(payload),
+                        min_edge=_paper_number(payload, DEFAULT_MIN_EDGE, "minEdge"),
+                        fee_rate=_paper_number(payload, DEFAULT_TAKER_FEE_RATE, "feeRate"),
+                        max_spread=_paper_number(payload, DEFAULT_MAX_SPREAD, "maxSpread"),
+                        min_ask_depth_shares=_paper_number(payload, DEFAULT_MIN_ASK_DEPTH_SHARES, "minAskDepthShares"),
+                        max_market_exposure=_paper_number(payload, DEFAULT_MAX_MARKET_EXPOSURE, "maxMarketExposure"),
+                        max_city_date_exposure=_paper_number(payload, DEFAULT_MAX_CITY_DATE_EXPOSURE, "maxCityDateExposure"),
+                    )
+                    order = None
+                results.append(
+                    {
+                        "model": model,
+                        "runKey": summary["runKey"],
+                        "cityId": summary["cityId"],
+                        "cityName": summary["cityName"],
+                        "targetDate": summary["targetDate"],
+                        "kind": summary["kind"],
+                        "bucketKey": preview.get("bucketKey"),
+                        "bucketLabel": preview.get("bucketLabel"),
+                        "ensembleProbability": preview.get("ensembleProbability"),
+                        "edge": preview.get("edge"),
+                        "accepted": preview.get("accepted"),
+                        "rejectReason": preview.get("rejectReason"),
+                        "orderKey": order.get("orderKey") if order else None,
+                    }
+                )
+    return {
+        "summary": {
+            "modelCount": len(models),
+            "cityCount": len(city_ids),
+            "candidateCount": len(results),
+            "acceptedOrderCount": sum(1 for item in results if item["accepted"]),
+        },
+        "results": results,
+        "statistics": storage.model_competition_stats(),
+    }
+
+
+def model_competition_stats_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"statistics": _paper_storage(payload).model_competition_stats()}
+
+
 def _paper_live_position_market_buckets(
     payload: dict[str, Any],
     *,
@@ -1552,6 +1698,41 @@ def paper_reconcile_payload(payload: dict[str, Any]) -> dict[str, Any]:
             result["summary"]["payout"] += imported_result["summary"]["payout"]
             result["summary"]["realizedPnl"] += imported_result["summary"]["realizedPnl"]
             result["account"] = imported_result["account"]
+
+    # 模型竞赛以模型账户隔离风控；常规“结算虚拟盘”也要一并结算这些持仓。
+    for competition_account_key in storage.model_competition_account_keys():
+        if competition_account_key == account_key:
+            continue
+        competition_result = storage.reconcile_paper_positions(
+            account_key=competition_account_key,
+            city_id=city_id,
+            target_date=target_date,
+            kind=kind,
+        )
+        competition_import = {"imported": [], "errors": [], "skipped": []}
+        if _bool_value(payload.get("autoImportSettlements"), default=True):
+            competition_import = _auto_import_missing_paper_settlements(
+                storage=storage,
+                account_key=competition_account_key,
+                city_id=city_id,
+                target_date=target_date,
+                kind=kind,
+            )
+            if competition_import["imported"]:
+                imported_result = storage.reconcile_paper_positions(
+                    account_key=competition_account_key,
+                    city_id=city_id,
+                    target_date=target_date,
+                    kind=kind,
+                )
+                competition_result["settlements"].extend(imported_result["settlements"])
+                for key in ("settledPositionCount", "payout", "realizedPnl"):
+                    competition_result["summary"][key] += imported_result["summary"][key]
+        result["settlements"].extend(competition_result["settlements"])
+        for key in ("settledPositionCount", "payout", "realizedPnl"):
+            result["summary"][key] += competition_result["summary"][key]
+        for key in ("imported", "errors", "skipped"):
+            import_result[key].extend(competition_import[key])
     result["summary"]["importedSettlementCount"] = len(import_result["imported"])
     result["summary"]["importErrorCount"] = len(import_result["errors"])
     result["summary"]["skippedSettlementImportCount"] = len(import_result["skipped"])
@@ -1649,6 +1830,8 @@ def main(argv: list[str] | None = None) -> int:
         "paper-preview": paper_preview_payload,
         "paper-buy": paper_buy_payload,
         "paper-portfolio": paper_portfolio_payload,
+        "model-competition": model_competition_payload,
+        "model-competition-stats": model_competition_stats_payload,
         "paper-mark": paper_mark_payload,
         "paper-reconcile": paper_reconcile_payload,
         "paper-exit-preview": paper_exit_preview_payload,

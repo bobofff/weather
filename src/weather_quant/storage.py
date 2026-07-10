@@ -23,6 +23,7 @@ from weather_quant.paper_trading import (
     exit_preview,
     find_market_bucket,
     hedge_preview,
+    optional_text,
     optional_float,
     paper_buy_preview,
     paper_position_key,
@@ -1363,12 +1364,12 @@ class WeatherStorage:
                     """
                     INSERT INTO weather_paper_position_settlements (
                       settlement_record_key, account_key, position_key,
-                      settlement_key, city_id, target_date, kind, outcome,
+                      run_key, model, settlement_key, city_id, target_date, kind, outcome,
                       bucket_label, bucket_key, actual_bucket_key, observed_value,
                       unit, shares, total_cost, payout, realized_pnl, settled_at,
                       raw_payload_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(settlement_record_key) DO UPDATE SET
                       actual_bucket_key = excluded.actual_bucket_key,
                       observed_value = excluded.observed_value,
@@ -1384,6 +1385,8 @@ class WeatherStorage:
                         settlement_record_key,
                         account_key,
                         row["position_key"],
+                        row.get("run_key"),
+                        row.get("model"),
                         row["settlement_key"],
                         row["city_id"],
                         row["target_date"],
@@ -1427,6 +1430,8 @@ class WeatherStorage:
                     {
                         "settlementRecordKey": settlement_record_key,
                         "positionKey": row["position_key"],
+                        "runKey": row.get("run_key"),
+                        "model": row.get("model"),
                         "settlementKey": row["settlement_key"],
                         "outcome": row["outcome"],
                         "won": won,
@@ -1446,6 +1451,95 @@ class WeatherStorage:
             "settlements": settlements,
             "account": self.get_or_create_paper_account(account_key=account_key),
         }
+
+    def model_competition_stats(self) -> dict[str, list[dict[str, Any]]]:
+        """返回模型竞赛已成交订单的模型、城市和温度类型统计。"""
+        self._ensure_schema()
+        with connect_database(self.path) as connection:
+            by_model = self._model_competition_stats_rows(connection, "orders.model")
+            by_city_model = self._model_competition_stats_rows(
+                connection,
+                "orders.city_id, orders.city_name, orders.model",
+            )
+            by_kind_model = self._model_competition_stats_rows(
+                connection,
+                "orders.kind, orders.model",
+            )
+        return {
+            "byModel": by_model,
+            "byCityModel": by_city_model,
+            "byKindModel": by_kind_model,
+        }
+
+    def model_competition_account_keys(self) -> list[str]:
+        """返回存在模型竞赛持仓的隔离虚拟账户。"""
+        self._ensure_schema()
+        with connect_database(self.path) as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT account_key
+                FROM weather_paper_positions
+                WHERE model IS NOT NULL AND account_key LIKE 'model-competition:%'
+                ORDER BY account_key ASC
+                """
+            ).fetchall()
+        return [str(row["account_key"]) for row in rows]
+
+    @staticmethod
+    def _model_competition_stats_rows(connection, group_by: str) -> list[dict[str, Any]]:  # noqa: ANN001
+        rows = connection.execute(
+            f"""
+            SELECT
+              orders.model AS model,
+              orders.city_id AS city_id,
+              MAX(orders.city_name) AS city_name,
+              orders.kind AS kind,
+              COUNT(*) AS order_count,
+              SUM(CASE WHEN settlements.settlement_record_key IS NOT NULL THEN 1 ELSE 0 END) AS settled_order_count,
+              SUM(CASE WHEN settlements.payout > 0 THEN 1 ELSE 0 END) AS hit_count,
+              SUM(orders.stake_usdc) AS total_stake,
+              COALESCE(SUM(settlements.payout), 0) AS total_payout,
+              COALESCE(SUM(settlements.realized_pnl), 0) AS realized_pnl,
+              AVG(orders.edge) AS average_edge
+            FROM weather_paper_orders orders
+            LEFT JOIN weather_paper_position_settlements settlements
+              ON settlements.position_key = (
+                SELECT trades.position_key
+                FROM weather_paper_trades trades
+                WHERE trades.order_key = orders.order_key
+                ORDER BY trades.id DESC
+                LIMIT 1
+              )
+            WHERE orders.model IS NOT NULL AND orders.status = 'FILLED'
+            GROUP BY {group_by}
+            ORDER BY realized_pnl DESC, order_count DESC, model ASC
+            """
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            settled = int(item["settled_order_count"] or 0)
+            hits = int(item["hit_count"] or 0)
+            stake = safe_float(item["total_stake"])
+            item.update(
+                {
+                    "model": item["model"],
+                    "cityId": item.pop("city_id"),
+                    "cityName": item.pop("city_name"),
+                    "kind": item["kind"],
+                    "orderCount": int(item.pop("order_count") or 0),
+                    "settledOrderCount": settled,
+                    "hitCount": hits,
+                    "winRate": hits / settled if settled else None,
+                    "totalStake": stake,
+                    "totalPayout": safe_float(item.pop("total_payout")),
+                    "realizedPnl": safe_float(item.pop("realized_pnl")),
+                    "averageEdge": item.pop("average_edge"),
+                }
+            )
+            item["roi"] = item["realizedPnl"] / stake if stake else None
+            result.append(item)
+        return result
 
     def paper_exit_preview(
         self,
@@ -1577,7 +1671,7 @@ class WeatherStorage:
         connection.execute(
             """
             INSERT INTO weather_paper_orders (
-              order_key, account_key, signal_snapshot_id, run_key,
+              order_key, account_key, signal_snapshot_id, run_key, model,
               market_snapshot_group, city_id, city_name, target_date, kind,
               settlement_station, station_id, metar_source, market_slug,
               condition_id, outcome, bucket_label, bucket_key, token_id,
@@ -1587,13 +1681,14 @@ class WeatherStorage:
               spread, ask_depth, status, reject_reason, created_at,
               raw_signal_json, raw_preview_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 order_key,
                 preview.get("accountKey"),
                 preview.get("signalSnapshotId"),
                 preview.get("runKey"),
+                preview.get("model"),
                 preview.get("marketSnapshotGroup"),
                 preview.get("cityId"),
                 preview.get("cityName"),
@@ -1651,17 +1746,19 @@ class WeatherStorage:
             kind=preview.get("kind"),
             bucket_key=str(preview.get("bucketKey") or "-"),
             token_id=preview.get("tokenId"),
+            model=optional_text(preview.get("model")),
+            run_key=optional_text(preview.get("runKey")),
         )
         connection.execute(
             """
             INSERT INTO weather_paper_positions (
-              position_key, account_key, city_id, city_name, target_date,
+              position_key, account_key, run_key, model, city_id, city_name, target_date,
               kind, market_snapshot_group, market_slug, condition_id, outcome,
               bucket_label, bucket_key, token_id, settlement_station, station_id,
               metar_source, open_shares, total_cost, average_entry_price,
               realized_pnl, status, opened_at, updated_at, closed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(position_key) DO UPDATE SET
               open_shares = weather_paper_positions.open_shares + excluded.open_shares,
               total_cost = weather_paper_positions.total_cost + excluded.total_cost,
@@ -1678,6 +1775,8 @@ class WeatherStorage:
             (
                 position_key,
                 preview.get("accountKey"),
+                preview.get("runKey"),
+                preview.get("model"),
                 preview.get("cityId"),
                 preview.get("cityName"),
                 preview.get("targetDate"),
@@ -1726,17 +1825,19 @@ class WeatherStorage:
         connection.execute(
             """
             INSERT INTO weather_paper_trades (
-              trade_key, account_key, order_key, position_key, side, outcome,
+              trade_key, account_key, order_key, position_key, run_key, model, side, outcome,
               bucket_label, bucket_key, token_id, shares, price, notional,
               fee, net_cost, traded_at, raw_fill_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trade_key,
                 preview.get("accountKey"),
                 order_key,
                 position_key,
+                preview.get("runKey"),
+                preview.get("model"),
                 preview.get("side") or "BUY_YES",
                 preview.get("outcome"),
                 preview.get("bucketLabel"),
@@ -1759,6 +1860,8 @@ class WeatherStorage:
             "tradeKey": row["trade_key"],
             "orderKey": row["order_key"],
             "positionKey": row["position_key"],
+            "runKey": row["run_key"],
+            "model": row["model"],
             "side": row["side"],
             "outcome": row["outcome"],
             "shares": row["shares"],
@@ -1954,6 +2057,7 @@ class WeatherStorage:
             "accountKey": row["account_key"],
             "signalSnapshotId": row["signal_snapshot_id"],
             "runKey": row["run_key"],
+            "model": row["model"],
             "marketSnapshotGroup": row["market_snapshot_group"],
             "cityId": row["city_id"],
             "cityName": row["city_name"],
@@ -2026,6 +2130,8 @@ class WeatherStorage:
         return {
             "positionKey": row["position_key"],
             "accountKey": row["account_key"],
+            "runKey": row["run_key"],
+            "model": row["model"],
             "cityId": row["city_id"],
             "cityName": row["city_name"],
             "targetDate": row["target_date"],
@@ -2091,6 +2197,8 @@ class WeatherStorage:
             "settlementRecordKey": row["settlement_record_key"],
             "accountKey": row["account_key"],
             "positionKey": row["position_key"],
+            "runKey": row["run_key"],
+            "model": row["model"],
             "settlementKey": row["settlement_key"],
             "cityId": row["city_id"],
             "targetDate": row["target_date"],

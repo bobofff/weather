@@ -149,6 +149,33 @@ class WeatherPortfolioTest(unittest.TestCase):
         self.assertFalse(result.is_true_arbitrage)
         self.assertEqual(result.recommendation, "SKIP_OVERROUND")
 
+    def test_infeasible_hedge_discards_runaway_intermediate_solution(self) -> None:
+        buckets = (
+            market_bucket("80", bid=0.30, ask=0.40, probability=0.34),
+            market_bucket("81", bid=0.30, ask=0.40, probability=0.33),
+            market_bucket("82", bid=0.30, ask=0.40, probability=0.33),
+        )
+        portfolio = Portfolio(
+            positions=(
+                Position(
+                    outcome="80",
+                    bucket=parse_temperature_bucket("80"),
+                    shares=100,
+                    total_cost=30,
+                ),
+            )
+        )
+
+        result = calculate_hedge_lock(portfolio, buckets, fee_rate=0.0)
+
+        self.assertFalse(result.is_feasible)
+        self.assertEqual(result.recommendation, "HEDGE_INFEASIBLE")
+        self.assertEqual(result.hedge_legs, ())
+        self.assertEqual(result.hedge_cost, 0.0)
+        self.assertAlmostEqual(result.worst_case_pnl, -30.0)
+        self.assertAlmostEqual(result.covered_worst_case_pnl, -30.0)
+        self.assertTrue(any("未收敛" in note for note in result.notes))
+
     def test_passive_exit_ladder_and_mark_vs_liquidation_value(self) -> None:
         bucket = market_bucket("80", bid=0.40, ask=0.60)
         position = Position(
